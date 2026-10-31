@@ -60,7 +60,11 @@ func New(iface string) *Client {
 	return &Client{iface: iface, timeout: 50 * time.Second}
 }
 
-// run 执行一条 nmcli 命令并返回 stdout。LC_ALL=C 固定输出语言。
+// run 执行一条 nmcli 命令并返回 stdout。
+//
+// locale 用 C.UTF-8 而不是 C：纯 C 下 nmcli 会把 SSID 里的非 ASCII 字符
+// 替换成 '?'（「sjj的网络」变「sjj???」），C.UTF-8 既保留英文的 yes/no
+// 字段输出，又不破坏 UTF-8 SSID。
 func (c *Client) run(args ...string) (string, error) {
 	if _, err := exec.LookPath("nmcli"); err != nil {
 		return "", errors.New("nmcli 不可用（设备上没有 NetworkManager？）")
@@ -68,7 +72,7 @@ func (c *Client) run(args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "nmcli", args...)
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	cmd.Env = append(os.Environ(), "LC_ALL=C.UTF-8")
 	var out, errOut bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut
@@ -209,7 +213,22 @@ func (c *Client) Connect(ssid, password string) error {
 		args = append(args, "password", password)
 	}
 	_, err = c.run(args...)
-	return err
+	if err != nil {
+		// 失败的连接会残留一个无效 profile（nmcli 先建再连），不清掉的话
+		// 下次重连会走 con up 而永远用不上新密码。best-effort 清理。
+		_, _ = c.run("connection", "delete", ssid)
+		msg := err.Error()
+		if strings.Contains(msg, "Secrets were required") ||
+			strings.Contains(msg, "no supplicant") ||
+			strings.Contains(msg, "802.1X") {
+			return errors.New("密码错误或认证失败")
+		}
+		if strings.Contains(msg, "No network with SSID") {
+			return errors.New("周边没找到该网络，请重新扫描")
+		}
+		return err
+	}
+	return nil
 }
 
 // savedLocked 是不加锁的 Saved，供 Connect 内部复用。
