@@ -3,17 +3,19 @@
 # 把编译好的二进制部署到设备。
 #
 # 用法：
-#   ./deploy.sh                       # 默认 192.168.1.100
-#   ./deploy.sh 192.168.1.100        # 指定设备
-#   DEVICE_PASS=1 ./deploy.sh         # 指定密码（非交互）
-#   ./deploy.sh --keep-old            # 不停止旧版 sms-gw 服务（默认会停，避免抢 8088）
+#   ./deploy.sh <设备地址>            # 例如 ./deploy.sh 192.168.1.100
+#   DEVICE_PASS=xxx ./deploy.sh <地址>  # 指定密码（非交互）
+#   ./deploy.sh <地址> --keep-old     # 不停止旧版 sms-gw 服务（默认会停，避免抢 8088）
+#
+# 其余可用环境变量：DEVICE_USER（默认 root）
 #
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-HOST="${1:-192.168.1.100}"
-[ "${HOST#-}" != "$HOST" ] && HOST="192.168.1.100"
+# 目标设备地址必须由调用方给出，脚本里不写死任何主机
+HOST="${1:-}"
+[ "${HOST#-}" != "$HOST" ] && HOST=""
 USER_NAME="${DEVICE_USER:-root}"
 PASS="${DEVICE_PASS:-}"
 BIN="dist/smsrelay-linux-arm64"
@@ -29,6 +31,7 @@ log()  { printf '\033[36m[deploy]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[deploy] %s\033[0m\n' "$*"; }
 die()  { printf '\033[31m[deploy] %s\033[0m\n' "$*" >&2; exit 1; }
 
+[ -n "$HOST" ] || die "缺少设备地址。用法：./deploy.sh <设备地址>（例如 ./deploy.sh 192.168.1.100）"
 [ -f "$BIN" ] || die "找不到 $BIN，先跑 ./build.sh"
 
 # ---------------------------------------------------------------------------

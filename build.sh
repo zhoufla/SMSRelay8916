@@ -16,9 +16,10 @@ APP_NAME="smsrelay"
 OUT_DIR="dist"
 VERSION="${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
 
-# 局域网现成代理，用于访问 proxy.golang.org 等国外站点。
-# 可通过环境变量覆盖：SMSRELAY_PROXY=http://other:port
-DEFAULT_PROXY="${SMSRELAY_PROXY:-http://127.0.0.1:7890}"
+# 可选 HTTP 代理：只在直连 goproxy.cn 失败时才用。
+# 本脚本不内置任何地址，需要时自己指定：
+#   export SMSRELAY_PROXY=http://127.0.0.1:7890    # 或 ./build.sh --proxy <url>
+DEFAULT_PROXY="${SMSRELAY_PROXY:-}"
 
 TARGET_OS="${TARGET_OS:-linux}"
 TARGET_ARCH="${TARGET_ARCH:-arm64}"
@@ -93,11 +94,12 @@ if [ "$USE_PROXY" = "auto" ]; then
     if probe "https://goproxy.cn/"; then
         log "goproxy.cn 直连可用，不走 HTTP 代理"
         USE_PROXY="off"
-    elif probe "$DEFAULT_PROXY"; then
+    elif [ -n "$DEFAULT_PROXY" ] && probe "$DEFAULT_PROXY"; then
         log "直连失败，改用代理 $DEFAULT_PROXY"
         USE_PROXY="on"
     else
-        log "两者都不通，仍尝试直连（可能失败）"
+        [ -z "$DEFAULT_PROXY" ] && log "直连失败且未配置 SMSRELAY_PROXY，仍尝试直连（可能失败）"
+        [ -n "$DEFAULT_PROXY" ] && log "两者都不通，仍尝试直连（可能失败）"
         USE_PROXY="off"
     fi
 fi
@@ -169,6 +171,6 @@ fi
 cat <<EOF
 
 下一步：
-  部署到设备   ./deploy.sh 192.168.1.100
-  或手工拷贝   scp $OUT root@192.168.1.100:/opt/smsrelay/smsrelay
+  部署到设备   ./deploy.sh <设备地址>
+  或手工拷贝   scp $OUT root@<设备地址>:/opt/smsrelay/smsrelay
 EOF

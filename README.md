@@ -99,7 +99,7 @@ cd ~/github/SMSRelay8916
 脚本会：
 
 1. 检查 Go ≥ 1.21
-2. 探测 `goproxy.cn` 直连是否可用，不通则自动切到局域网代理 `http://127.0.0.1:7890`（可用 `SMSRELAY_PROXY` 覆盖，`--no-proxy` 强制直连）
+2. 探测 `goproxy.cn` 直连是否可用；不通时才使用 `SMSRELAY_PROXY` 指定的代理（脚本**不内置任何代理地址**，`--no-proxy` 强制直连）
 3. 首次运行 `go get` 拉 `godbus/dbus/v5` 与 `modernc.org/sqlite`
 4. `CGO_ENABLED=0` 编译静态二进制
 
@@ -108,7 +108,7 @@ cd ~/github/SMSRelay8916
 ## 部署
 
 ```bash
-DEVICE_PASS=1 ./deploy.sh 192.168.1.100
+DEVICE_PASS=<设备密码> ./deploy.sh <设备地址>
 ```
 
 脚本会：校验架构 → 上传 → 装到 `/opt/smsrelay/` → 复用旧配置（`/etc/sms-gw/config.json`）→ 停旧 `sms-gw` → 启 `smsrelay` → 自检。
@@ -146,6 +146,21 @@ systemctl enable --now sms-gw
 - `api_token` 为空表示不鉴权；非空时需 `X-Token` 头或 `?token=`
 - `web_dir` 存在时优先用外部 `index.html`，改页面不用重编译
 - `guard_interval` 是兜底轮询秒数，设 0 用默认 60
+- 上面所有值都是**占位值**：`own_number` 换成你自己的号码（留空则跟随 SIM 卡），`access_token` 换成真实 token
+
+## 安全与隐私
+
+这个仓库里**不含任何真实凭证或个人数据**，并且刻意做了以下约束：
+
+| 项 | 做法 |
+|---|---|
+| `config.json`（含 token、本机号码） | 在 `.gitignore` 里，永不入库；只存在设备本地 |
+| 钉钉 / Cloudflare Token | 只出现在设备上的配置文件与数据库；接口返回一律脱敏成 `****1234` |
+| 设备地址、密码、代理 | 脚本不内置，全部通过参数或环境变量传入 |
+| 文档里的号码 / IP / IPv6 | 全部为占位值（`13800000000`、`192.168.1.100`、`203.0.113.10`、`2409:xxxx:...`） |
+
+部署到公网前请自行加固：设置 `api_token`、把 8088 只监听内网或套反向代理加 TLS、
+不要把 `/api/settings` 与 `/api/ddns` 直接暴露到公网（它们能读到脱敏后的 token 前缀与全部配置）。
 
 ## HTTP API
 
