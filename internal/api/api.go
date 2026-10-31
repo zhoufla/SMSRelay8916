@@ -22,6 +22,7 @@ import (
 	"github.com/zhoufla/SMSRelay8916/internal/ddns"
 	"github.com/zhoufla/SMSRelay8916/internal/eventbus"
 	"github.com/zhoufla/SMSRelay8916/internal/forward"
+	"github.com/zhoufla/SMSRelay8916/internal/logbuf"
 	"github.com/zhoufla/SMSRelay8916/internal/store"
 )
 
@@ -84,6 +85,11 @@ type Backend interface {
 	ForwardTest() error
 	ResetForward(id int64) error
 	DeleteMessage(id int64) error
+	// 批量删除与按保留策略清理（返回实际删除条数）
+	DeleteMessages(ids []int64) (int64, error)
+	CleanupNow() (int64, error)
+	// 内存环形缓冲里的运行日志
+	Logs(limit int, level string) []logbuf.Entry
 	ListChannels() ([]forward.Channel, error)
 	CreateChannel(*forward.Channel) error
 	UpdateChannel(*forward.Channel) error
@@ -216,6 +222,32 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodGet && path == "/api/messages":
 		s.listMessages(w, r)
+
+	// 批量删除必须放在按 id 匹配的 DELETE 分支之前不被误匹配，
+	// 实际上方法不同不会冲突，但放在一起便于阅读
+	case r.Method == http.MethodPost && path == "/api/messages/batch-delete":
+		s.batchDelete(w, r)
+
+	case r.Method == http.MethodPost && path == "/api/maintenance/cleanup":
+		n, err := s.backend.CleanupNow()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "deleted": n})
+
+	case r.Method == http.MethodGet && path == "/api/logs":
+		limit := 300
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		items := s.backend.Logs(limit, r.URL.Query().Get("level"))
+		if items == nil {
+			items = []logbuf.Entry{}
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
 
 	case r.Method == http.MethodPost && path == "/api/send":
 		s.send(w, r)
@@ -515,10 +547,11 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	lq := store.ListQuery{
-		Dir:    q.Get("dir"),
-		Q:      strings.TrimSpace(q.Get("q")),
-		Limit:  limit,
-		Offset: offset,
+		Dir:     q.Get("dir"),
+		Q:       strings.TrimSpace(q.Get("q")),
+		HasCode: q.Get("has_code") == "1",
+		Limit:   limit,
+		Offset:  offset,
 	}
 	items, total, err := s.backend.ListMessages(lq)
 	if err != nil {
@@ -534,6 +567,34 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
 		"offset": offset,
 		"items":  items,
 	})
+}
+
+// maxBatchDelete 限制单次批量删除的条数，防误传超长列表把 SQL 撑爆。
+const maxBatchDelete = 1000
+
+func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
+		return
+	}
+	if len(body.IDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ids 不能为空"})
+		return
+	}
+	if len(body.IDs) > maxBatchDelete {
+		writeJSON(w, http.StatusBadRequest,
+			map[string]string{"error": fmt.Sprintf("单次最多删除 %d 条", maxBatchDelete)})
+		return
+	}
+	n, err := s.backend.DeleteMessages(body.IDs)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "deleted": n})
 }
 
 func (s *Server) send(w http.ResponseWriter, r *http.Request) {

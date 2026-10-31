@@ -81,6 +81,22 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
 .more{display:block;width:100%;margin-top:12px;padding:11px;background:var(--bg2);border:1px solid var(--line);
   border-radius:11px;color:var(--fg2);font:inherit;font-size:13px;cursor:pointer}
 
+/* 验证码高亮与批量选择 */
+.hl{background:rgba(76,154,255,.16);color:var(--accent);border-radius:4px;padding:0 3px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:650;letter-spacing:.5px}
+.sel{accent-color:var(--accent2);width:15px;height:15px;flex:0 0 auto;cursor:pointer;margin-right:2px}
+.batchbar{display:flex;gap:10px;margin-bottom:10px;align-items:center;
+  background:rgba(76,154,255,.07);border:1px solid rgba(76,154,255,.25);border-radius:10px;padding:7px 11px;font-size:12.5px}
+.batchbar label{display:flex;align-items:center;gap:6px;color:var(--fg2);cursor:pointer;margin-right:auto}
+
+/* 日志 */
+.logrow{display:flex;gap:10px;padding:5px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11.5px;border-bottom:1px solid var(--line);line-height:1.5}
+.logrow:last-child{border-bottom:0}
+.logrow .t{color:var(--fg3);flex:0 0 auto}
+.logrow .m{white-space:pre-wrap;word-break:break-all;color:#cfd6e0}
+.logrow.warn .m{color:var(--warn)}
+
 /* 系统指标 */
 .grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:10px}
 .metric{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:11px 12px}
@@ -155,6 +171,7 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
     <button data-tab="sys">系统</button>
     <button data-tab="set">设置</button>
     <button data-tab="ddns">DDNS</button>
+    <button data-tab="log">日志</button>
   </div>
 
   <!-- ============ 短信 ============ -->
@@ -171,12 +188,18 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
         <button data-dir="" class="act">全部</button>
         <button data-dir="in">收件</button>
         <button data-dir="out">已发</button>
+        <button data-code="1" id="code-toggle">验证码</button>
       </div>
       <label class="search">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
           <circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
         <input id="q" placeholder="搜索号码或内容" autocomplete="off">
       </label>
+    </div>
+
+    <div class="batchbar" id="batchbar" style="display:none">
+      <label><input type="checkbox" id="selall" class="sel">全选本页</label>
+      <button class="btn ghost" id="batchdel" style="color:var(--err)">删除所选（<span id="selcount">0</span>）</button>
     </div>
 
     <div class="list" id="list"><div class="empty">加载中…</div></div>
@@ -241,6 +264,20 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
       <div class="act">
         <button class="btn" id="own-save">保存</button>
         <button class="btn ghost" id="own-clear">清空</button>
+      </div>
+    </div>
+
+    <div class="sec-title">数据保留</div>
+    <div class="field">
+      <label>归档保留天数</label>
+      <input id="retain" type="number" min="0" max="3650" inputmode="numeric" placeholder="0 = 不自动清理">
+      <div class="hint">
+        超过天数的归档记录每 6 小时自动清一次（连同投递记录，不可恢复）。
+        留空或 0 表示永久保留。修改后下一轮自动生效，或点「立即清理」马上执行。
+      </div>
+      <div class="act">
+        <button class="btn" id="retain-save">保存</button>
+        <button class="btn ghost" id="retain-clean">立即清理</button>
       </div>
     </div>
 
@@ -333,6 +370,22 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
       同一域名可以建两条（一条 A、一条 AAAA），也可以只建一条。每 5 分钟检查一次，地址没变不会调用 API。
     </div>
   </div>
+
+  <!-- ============ 日志 ============ -->
+  <div class="panel" id="pane-log">
+    <div class="tools">
+      <div class="seg" id="logseg">
+        <button data-lv="" class="act">全部</button>
+        <button data-lv="warn">警告</button>
+      </div>
+      <button class="btn ghost" id="log-refresh" style="margin-left:auto">刷新</button>
+    </div>
+    <div class="rows" id="loglist"><div class="empty">加载中…</div></div>
+    <div class="hint" style="margin-top:8px">
+      最近 500 条运行日志（内存缓冲，重启后清空）。完整历史在设备上执行
+      <code>journalctl -u smsrelay</code> 查看。
+    </div>
+  </div>
 </div>
 
 <button class="fab" id="fab">+</button>
@@ -357,6 +410,9 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
 <script>
 const $ = s => document.querySelector(s);
 let dir = "", offset = 0, limit = 30, total = 0, timer = null, loading = false;
+let hasCode = false;                 // 只看提取到验证码的短信
+const selIds = new Set();            // 批量删除选中的 id
+let logLv = "";                      // 日志级别过滤
 let curTab = 'sms', es = null, esOK = false;
 const TOKEN = localStorage.getItem('smsgw_token') || '';
 const H = TOKEN ? {'X-Token': TOKEN} : {};
@@ -410,8 +466,28 @@ async function loadStatus(){
   }
 }
 
+// 在已转义的正文里高亮验证码：先 esc 再包裹，纯数字不会有转义残留
+function highlightCode(escapedBody, code){
+  if(!code) return escapedBody;
+  const i = escapedBody.indexOf(code);
+  if(i < 0) return escapedBody;
+  return escapedBody.slice(0, i) + '<span class="hl">' + code + '</span>' + escapedBody.slice(i + code.length);
+}
+
+// 列表重绘后恢复复选框状态并刷新计数
+function syncSel(){
+  document.querySelectorAll('#list input.sel').forEach(cb => { cb.checked = selIds.has(+cb.dataset.id); });
+  syncSelAll();
+  $('#batchbar').style.display = selIds.size ? 'flex' : 'none';
+  $('#selcount').textContent = selIds.size;
+}
+function syncSelAll(){
+  const boxes = [...document.querySelectorAll('#list input.sel')];
+  $('#selall').checked = boxes.length > 0 && boxes.every(cb => cb.checked);
+}
+
 function render(items){
-  if(!items.length){ $('#list').innerHTML = '<div class="empty">没有短信</div>'; return; }
+  if(!items.length){ $('#list').innerHTML = '<div class="empty">没有短信</div>'; syncSel(); return; }
   $('#list').innerHTML = items.map(m => {
     const cls = m.dir === 'in' ? 'in' : 'out';
     let tags = `<span class="tag ${cls}">${m.dir === 'in' ? '收' : '发'}</span>`;
@@ -425,17 +501,20 @@ function render(items){
       else tags += `<span class="tag fw">待转发</span>`;
     }
     return `<div class="msg ${cls}">
-      <div class="mh"><span class="peer">${esc(m.peer)}</span>${tags}
+      <div class="mh"><input type="checkbox" class="sel" data-id="${m.id}">
+        <span class="peer">${esc(m.peer)}</span>${tags}
         <span class="time">${fmtTime(m.ts)}</span></div>
-      <div class="body clip" data-id="${m.id}">${esc(m.body)}</div>
+      <div class="body clip" data-id="${m.id}">${highlightCode(esc(m.body), m.code)}</div>
       <div class="mf">
         <button data-act="re" data-id="${m.id}">回复</button>
+        ${m.code ? `<button data-act="copy" data-code="${esc(m.code)}">复制码</button>` : ''}
         ${m.dir === 'in' && m.forwarded != 1 ? `<button data-act="fw" data-id="${m.id}">重新转发</button>` : ''}
         <button data-act="del" data-id="${m.id}">删除</button>
       </div>
     </div>`;
   }).join('');
   $('#more').style.display = (offset + items.length < total) ? 'block' : 'none';
+  syncSel();
 }
 
 async function loadMessages(reset){
@@ -443,7 +522,7 @@ async function loadMessages(reset){
   if(reset){ offset = 0; }
   const q = encodeURIComponent($('#q').value.trim());
   try{
-    const r = await api(`/api/messages?limit=${limit}&offset=${offset}&dir=${dir}&q=${q}`);
+    const r = await api(`/api/messages?limit=${limit}&offset=${offset}&dir=${dir}&has_code=${hasCode ? 1 : 0}&q=${q}`);
     total = r.total;
     if(reset) render(r.items);
     else {
@@ -539,6 +618,7 @@ async function loadSettings(){
     b.className = 'badge ' + (s.own_number_source === 'none' ? 'err' : (s.own_number_source === 'manual' ? 'ok' : 'warn'));
     $('#token-warn').style.display = s.api_token_set ? 'none' : 'block';
     $('#set-api').textContent = '接口口令：' + (s.api_token_set ? '已设置' : '未设置（任何人可访问）');
+    $('#retain').value = (s.values && s.values.retain_days) || '';
   }catch(e){ }
   loadChannels();
 }
@@ -729,6 +809,24 @@ async function saveDDNS(){
   }catch(e){ toast('保存失败：' + e.message); }
 }
 
+/* ---------------- 日志 ---------------- */
+async function loadLogs(){
+  try{
+    const r = await api('/api/logs?limit=300&level=' + encodeURIComponent(logLv));
+    const items = r.items || [];
+    $('#loglist').innerHTML = items.length
+      ? items.map(e => `<div class="logrow ${e.level === 'warn' ? 'warn' : ''}"><span class="t">${esc(e.ts)}</span><span class="m">${esc(e.msg)}</span></div>`).join('')
+      : '<div class="empty">暂无日志</div>';
+  }catch(e){ $('#loglist').innerHTML = '<div class="empty">加载失败</div>'; }
+}
+$('#logseg').addEventListener('click', e => {
+  const b = e.target.closest('button'); if(!b) return;
+  [...$('#logseg').children].forEach(x => x.classList.remove('act'));
+  b.classList.add('act'); logLv = b.dataset.lv;
+  loadLogs();
+});
+$('#log-refresh').addEventListener('click', loadLogs);
+
 /* ---------------- Tab ---------------- */
 $('#tabs').addEventListener('click', e => {
   const b = e.target.closest('button'); if(!b) return;
@@ -742,6 +840,7 @@ $('#tabs').addEventListener('click', e => {
   if(curTab === 'sys') loadSystem();
   if(curTab === 'set') loadSettings();
   if(curTab === 'ddns') loadDDNS();
+  if(curTab === 'log') loadLogs();
 });
 
 /* ---------------- 交互 ---------------- */
@@ -757,7 +856,14 @@ function closeCompose(){
 
 $('#seg').addEventListener('click', e => {
   const b = e.target.closest('button'); if(!b) return;
-  [...$('#seg').children].forEach(x => x.classList.remove('act'));
+  if(b.dataset.code){
+    // 验证码筛选是独立开关，不影响收/发方向
+    hasCode = !hasCode;
+    b.classList.toggle('act', hasCode);
+    loadMessages(true);
+    return;
+  }
+  [...$('#seg').children].forEach(x => { if(x.dataset.dir !== undefined) x.classList.remove('act'); });
   b.classList.add('act'); dir = b.dataset.dir;
   loadMessages(true);
 });
@@ -767,6 +873,25 @@ $('#fab').addEventListener('click', () => openCompose());
 $('#close').addEventListener('click', closeCompose);
 $('#own-save').addEventListener('click', () => saveOwnNumber($('#own-num').value.trim()));
 $('#own-clear').addEventListener('click', () => { $('#own-num').value = ''; saveOwnNumber(''); });
+$('#retain-save').addEventListener('click', async () => {
+  const v = $('#retain').value.trim();
+  if(v !== '' && (!/^\d+$/.test(v) || +v < 0 || +v > 3650)){ toast('保留天数必须是 0~3650 的整数'); return; }
+  try{
+    await api('/api/settings', {method:'PUT', body: JSON.stringify({retain_days: v})});
+    toast(v === '' || +v === 0 ? '已保存：不自动清理' : `已保存：保留 ${v} 天`);
+    loadSettings();
+  }catch(e){ toast('保存失败：' + e.message); }
+});
+$('#retain-clean').addEventListener('click', async () => {
+  const b = $('#retain-clean');
+  if(!confirm('按当前保留天数立即清理一次过期记录？不可恢复。')) return;
+  b.disabled = true; b.textContent = '清理中…';
+  try{
+    const r = await api('/api/maintenance/cleanup', {method:'POST'});
+    toast(r.deleted > 0 ? `已清理 ${r.deleted} 条过期记录` : '没有过期记录');
+  }catch(e){ toast('清理失败：' + e.message); }
+  b.disabled = false; b.textContent = '立即清理';
+});
 
 $('#d-add').addEventListener('click', () => openDDNSForm(null));
 $('#d-save').addEventListener('click', saveDDNS);
@@ -822,6 +947,26 @@ $('#ch-list').addEventListener('click', async e => {
     catch(err){ toast('删除失败：' + err.message); }
   }
 });
+// 复制到剪贴板。设备页面通常走 HTTP（非安全上下文），navigator.clipboard
+// 不可用，必须留 execCommand 降级，否则手机上点了没反应
+function copyText(t){
+  const done = ok => toast(ok ? '已复制 ' + t : '复制失败，请手动选择');
+  const fallback = () => {
+    const ta = document.createElement('textarea');
+    ta.value = t;
+    ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try{ ok = document.execCommand('copy'); }catch(_){}
+    document.body.removeChild(ta);
+    done(ok);
+  };
+  if(navigator.clipboard && window.isSecureContext){
+    navigator.clipboard.writeText(t).then(() => done(true), fallback);
+  } else fallback();
+}
+
 $('#list').addEventListener('click', async e => {
   const b = e.target.closest('button');
   if(b){
@@ -830,9 +975,13 @@ $('#list').addEventListener('click', async e => {
       const peer = b.closest('.msg').querySelector('.peer').textContent;
       openCompose(peer); return;
     }
+    if(b.dataset.act === 'copy'){
+      copyText(b.dataset.code); return;
+    }
     if(b.dataset.act === 'del'){
       if(!confirm('删除这条记录？')) return;
       await api('/api/messages/' + id, {method: 'DELETE'});
+      selIds.delete(+id);
       loadMessages(true); loadStatus(); return;
     }
     if(b.dataset.act === 'fw'){
@@ -842,6 +991,38 @@ $('#list').addEventListener('click', async e => {
   }
   const body = e.target.closest('.body');
   if(body) body.classList.toggle('clip');
+});
+
+/* 批量选择 */
+$('#list').addEventListener('change', e => {
+  const cb = e.target.closest('input.sel');
+  if(!cb) return;
+  const id = +cb.dataset.id;
+  if(cb.checked) selIds.add(id); else selIds.delete(id);
+  syncSelAll();
+  $('#batchbar').style.display = selIds.size ? 'flex' : 'none';
+  $('#selcount').textContent = selIds.size;
+});
+$('#selall').addEventListener('change', e => {
+  const on = e.target.checked;
+  document.querySelectorAll('#list input.sel').forEach(cb => {
+    cb.checked = on;
+    const id = +cb.dataset.id;
+    if(on) selIds.add(id); else selIds.delete(id);
+  });
+  $('#batchbar').style.display = selIds.size ? 'flex' : 'none';
+  $('#selcount').textContent = selIds.size;
+});
+$('#batchdel').addEventListener('click', async () => {
+  const ids = [...selIds];
+  if(!ids.length) return;
+  if(!confirm(`删除所选的 ${ids.length} 条记录？不可恢复。`)) return;
+  try{
+    const r = await api('/api/messages/batch-delete', {method: 'POST', body: JSON.stringify({ids})});
+    toast(`已删除 ${r.deleted} 条`);
+    selIds.clear();
+    loadMessages(true); loadStatus();
+  }catch(err){ toast('批量删除失败：' + err.message); }
 });
 function updateCount(){
   const t = $('#txt').value;
@@ -915,7 +1096,7 @@ function connectSSE(){
 
 function onNewSMS(m){
   if(m && m.dir === 'in'){
-    toast('收到 ' + (m.peer || '未知号码') + ' 的短信');
+    toast('收到 ' + (m.peer || '未知号码') + ' 的短信' + (m.code ? '，验证码 ' + m.code : ''));
   }
   loadStatus();
   // 只有用户停在列表顶部时才自动刷新，避免打断正在翻页的人
@@ -932,6 +1113,12 @@ timer = setInterval(() => {
   if(curTab === 'sms'){ loadStatus(); loadMessages(true); }
   else if(curTab === 'sys') loadSystem();
 }, 15000);
+
+// 日志 Tab 激活时轻量轮询刷新（只在前台时）
+setInterval(() => {
+  if(document.hidden || curTab !== 'log') return;
+  loadLogs();
+}, 5000);
 
 document.addEventListener('visibilitychange', () => {
   if(document.hidden) return;

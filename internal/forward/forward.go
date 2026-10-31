@@ -60,6 +60,7 @@ type Vars struct {
 	OwnNumber string // 本机号码（收信号码）
 	Number    string // 发送方号码
 	Body      string // 正文
+	Code      string // 提取到的验证码，可能为空（非验证码短信 / 出站）
 	TS        string // 时间
 	ID        int64  // 记录 id
 	Direction string // in / out
@@ -68,6 +69,10 @@ type Vars struct {
 
 // 默认模板：带本机号码。这正是「转发内容里要有收信号码」的落地方式。
 const defaultTemplate = "{{prefix}}收到短信\n收信号码：{{own_number}}\n发送号码：{{number}}\n内容：{{body}}\n时间：{{ts}}"
+
+// 带验证码的默认模板：验证码单独一行放在最前，钉钉上一眼可见，不用翻正文。
+// 仅在正文提取到验证码时使用（见 Render）。
+const defaultTemplateWithCode = "{{prefix}}收到短信\n验证码：{{code}}\n收信号码：{{own_number}}\n发送号码：{{number}}\n内容：{{body}}\n时间：{{ts}}"
 
 // DefaultWebhookTemplate 是 webhook 通道没填正文模板时的兜底。
 //
@@ -85,9 +90,15 @@ var placeholderRe = regexp.MustCompile(`\{\{(\w+)\}\}`)
 // 后者是带引号的 JSON 字符串字面量（用于 JSON 模板）。
 // 阶段一次性替换，替换进去的内容不会被再次当成占位符解析 ——
 // 这样短信正文里出现 "{{number}}" 也不会被二次替换。
+//
+// tmpl 为空时选默认模板：正文带验证码用带码版（钉钉首行直接显示验证码），
+// 否则用普通版。注意模板是静态的、没有条件语法，所以带不带码要在选模板这一步分流。
 func Render(tmpl string, v Vars) string {
 	if tmpl == "" {
 		tmpl = defaultTemplate
+		if v.Code != "" {
+			tmpl = defaultTemplateWithCode
+		}
 	}
 	own := v.OwnNumber
 	if own == "" {
@@ -103,6 +114,7 @@ func Render(tmpl string, v Vars) string {
 		"own_number": own,
 		"number":     v.Number,
 		"body":       v.Body,
+		"code":       v.Code,
 		"ts":         v.TS,
 		"id":         strconv.FormatInt(v.ID, 10),
 		"dir":        v.Direction,
@@ -111,6 +123,7 @@ func Render(tmpl string, v Vars) string {
 		"own_number_json": jsonString(own),
 		"number_json":     jsonString(v.Number),
 		"body_json":       jsonString(v.Body),
+		"code_json":       jsonString(v.Code),
 		"ts_json":         jsonString(v.TS),
 		"dir_json":        jsonString(v.Direction),
 		"prefix_json":     jsonString(strings.TrimSpace(prefix)),
@@ -168,7 +181,8 @@ func (s *Sender) sendDingTalk(ch Channel, v Vars) error {
 		return fmt.Errorf("webhook 地址为空")
 	}
 
-	content := Render(defaultTemplate, v)
+	// 传空模板让 Render 按有没有验证码选默认版（带码版首行显示验证码）
+	content := Render("", v)
 
 	payload := map[string]interface{}{
 		"msgtype": "text",

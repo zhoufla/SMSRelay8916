@@ -116,3 +116,44 @@ func TestDefaultWebhookTemplateParses(t *testing.T) {
 		t.Fatalf("默认模板应使用 body_json")
 	}
 }
+
+// 带验证码时空模板选带码默认版，验证码独立成行、在最前。
+func TestRenderDefaultWithCode(t *testing.T) {
+	v := baseVars()
+	v.Code = "483921"
+	out := Render("", v)
+	if !strings.HasPrefix(out, "收到短信\n验证码：483921\n") {
+		t.Fatalf("带码默认模板首行应是验证码: %q", out)
+	}
+}
+
+// 不带验证码时绝不能出现空的「验证码：」行。
+func TestRenderDefaultWithoutCode(t *testing.T) {
+	out := Render("", baseVars())
+	if strings.Contains(out, "验证码") {
+		t.Fatalf("无码消息不应出现验证码行: %q", out)
+	}
+}
+
+// code_json 与其它 *_json 一样要自带引号。
+func TestRenderCodeJSON(t *testing.T) {
+	v := baseVars()
+	v.Code = "483921"
+	out := Render(`{"code":{{code_json}}}`, v)
+	var m map[string]string
+	if err := json.Unmarshal([]byte(out), &m); err != nil {
+		t.Fatalf("code_json 产出非法 JSON: %v\n输出: %s", err, out)
+	}
+	if m["code"] != "483921" {
+		t.Fatalf("code 不对: %q", m["code"])
+	}
+	// 空验证码渲染成空字符串，仍然是合法 JSON
+	out2 := Render(`{"code":{{code_json}}}`, baseVars())
+	var m2 map[string]string
+	if err := json.Unmarshal([]byte(out2), &m2); err != nil {
+		t.Fatalf("空 code_json 产出非法 JSON: %v", err)
+	}
+	if m2["code"] != "" {
+		t.Fatalf("空 code 应渲染为空串: %q", m2["code"])
+	}
+}

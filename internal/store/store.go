@@ -1,7 +1,7 @@
 // Package store 负责短信归档库（SQLite）。
 //
 // 表结构与早期 Python 版完全一致，因此可以直接复用同一个 sms.db，
-// 不需要任何数据迁移。唯一的升级逻辑是给老库补 delay_s 列。
+// 不需要任何数据迁移。升级逻辑只有给老库补列（delay_s、code）。
 package store
 
 import (
@@ -12,12 +12,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 
 	"github.com/zhoufla/SMSRelay8916/internal/ddns"
 	"github.com/zhoufla/SMSRelay8916/internal/forward"
+	"github.com/zhoufla/SMSRelay8916/internal/otp"
 )
 
 // Message 对应 messages 表的一行。
@@ -27,6 +29,7 @@ type Message struct {
 	Dir          string `json:"dir"`
 	Peer         string `json:"peer"`
 	Body         string `json:"body"`
+	Code         string `json:"code"` // 从正文提取的验证码，仅入站短信可能有
 	TS           string `json:"ts"`
 	State        string `json:"state"`
 	Storage      string `json:"storage"`
@@ -47,6 +50,7 @@ CREATE TABLE IF NOT EXISTS messages (
     dir           TEXT NOT NULL,
     peer          TEXT,
     body          TEXT,
+    code          TEXT NOT NULL DEFAULT '',
     ts            TEXT,
     state         TEXT,
     storage       TEXT,
@@ -148,10 +152,15 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	st := &Store{db: db}
+	if err := st.backfillCodes(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return st, nil
 }
 
-// migrate 给老库补 delay_s 列（Python 版早期版本没有这一列）。
+// migrate 给老库补列。Python 版早期连 delay_s 都没有。
 func migrate(db *sql.DB) error {
 	rows, err := db.Query("PRAGMA table_info(messages)")
 	if err != nil {
@@ -178,18 +187,57 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 
-	for _, want := range []string{"delay_s"} {
+	for _, add := range []struct{ name, ddl string }{
+		{"delay_s", "ALTER TABLE messages ADD COLUMN delay_s INTEGER"},
+		{"code", "ALTER TABLE messages ADD COLUMN code TEXT NOT NULL DEFAULT ''"},
+	} {
 		found := false
 		for _, c := range cols {
-			if c == want {
+			if c == add.name {
 				found = true
 				break
 			}
 		}
 		if !found {
-			if _, err := db.Exec("ALTER TABLE messages ADD COLUMN delay_s INTEGER"); err != nil {
-				return fmt.Errorf("添加 %s 列失败: %w", want, err)
+			if _, err := db.Exec(add.ddl); err != nil {
+				return fmt.Errorf("添加 %s 列失败: %w", add.name, err)
 			}
+		}
+	}
+	return nil
+}
+
+// backfillCodes 给升级前的历史入站短信补提取验证码。
+// 只处理 code 为空的入站行，第一次启动跑完后就再也没有待回填的行，开销趋近于零。
+func (s *Store) backfillCodes() error {
+	rows, err := s.db.Query("SELECT id, body FROM messages WHERE dir='in' AND code=''")
+	if err != nil {
+		return fmt.Errorf("回填验证码查询失败: %w", err)
+	}
+	type item struct {
+		id   int64
+		code string
+	}
+	var items []item
+	for rows.Next() {
+		var id int64
+		var body sql.NullString
+		if err := rows.Scan(&id, &body); err != nil {
+			rows.Close()
+			return err
+		}
+		if c := otp.Extract(body.String); c != "" {
+			items = append(items, item{id, c})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, it := range items {
+		if _, err := s.db.Exec("UPDATE messages SET code=? WHERE id=?", it.code, it.id); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -233,6 +281,11 @@ func DeliveryDelay(ts string) *int {
 //  3. 否则插入新行
 func (s *Store) Archive(m Message) (bool, error) {
 	m.Hash = ContentHash(m.PDUType, m.Peer, m.TS, m.Body)
+	// 验证码是正文的派生数据，在归档入口统一提取（只关心入站）。
+	// 放在这里而不是调用方，保证插入与哈希命中两条路径行为一致。
+	if m.Dir == "in" && m.Code == "" {
+		m.Code = otp.Extract(m.Body)
+	}
 
 	var exists int
 	err := s.db.QueryRow("SELECT 1 FROM messages WHERE hash=? LIMIT 1", m.Hash).Scan(&exists)
@@ -266,9 +319,9 @@ func (s *Store) Archive(m Message) (bool, error) {
 
 	res, err := s.db.Exec(
 		`INSERT OR IGNORE INTO messages
-		   (dir, peer, body, ts, state, storage, smsc, pdu_type, mm_path, hash, delay_s)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		m.Dir, m.Peer, m.Body, m.TS, m.State, m.Storage, m.SMSC, m.PDUType, m.MMPath, m.Hash, m.DelayS)
+		   (dir, peer, body, ts, state, storage, smsc, pdu_type, mm_path, hash, delay_s, code)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		m.Dir, m.Peer, m.Body, m.TS, m.State, m.Storage, m.SMSC, m.PDUType, m.MMPath, m.Hash, m.DelayS, m.Code)
 	if err != nil {
 		return false, err
 	}
@@ -319,7 +372,7 @@ func (s *Store) Get(id int64) (*Message, error) {
 	return m, nil
 }
 
-const selectAll = `SELECT id, dir, peer, body, ts, state, storage, smsc, pdu_type,
+const selectAll = `SELECT id, dir, peer, body, code, ts, state, storage, smsc, pdu_type,
        mm_path, hash, forwarded, attempts, forward_error, delay_s, created_at`
 
 type rowScanner interface {
@@ -342,7 +395,7 @@ func scanMessage(r rowScanner) (*Message, error) {
 		delay     sql.NullInt64
 		createdAt sql.NullString
 	)
-	err := r.Scan(&m.ID, &m.Dir, &peer, &body, &ts, &state, &storage, &smsc,
+	err := r.Scan(&m.ID, &m.Dir, &peer, &body, &m.Code, &ts, &state, &storage, &smsc,
 		&pduType, &mmPath, &hash, &m.Forwarded, &m.Attempts, &fwErr, &delay, &createdAt)
 	if err != nil {
 		return nil, err
@@ -359,10 +412,11 @@ func scanMessage(r rowScanner) (*Message, error) {
 
 // ListQuery 是 /api/messages 的查询条件。
 type ListQuery struct {
-	Dir    string
-	Q      string
-	Limit  int
-	Offset int
+	Dir     string
+	Q       string
+	HasCode bool // 只看提取到验证码的消息
+	Limit   int
+	Offset  int
 }
 
 // List 返回分页结果与总数。
@@ -372,6 +426,9 @@ func (s *Store) List(q ListQuery) ([]Message, int, error) {
 	if q.Dir == "in" || q.Dir == "out" {
 		where += " AND dir=?"
 		args = append(args, q.Dir)
+	}
+	if q.HasCode {
+		where += " AND code != ''"
 	}
 	if q.Q != "" {
 		where += " AND (peer LIKE ? OR body LIKE ?)"
@@ -407,6 +464,75 @@ func (s *Store) List(q ListQuery) ([]Message, int, error) {
 func (s *Store) Delete(id int64) error {
 	_, err := s.db.Exec("DELETE FROM messages WHERE id=?", id)
 	return err
+}
+
+// deletePlaceholder 生成 "?,?,?" 占位符。
+func deletePlaceholder(n int) (string, []interface{}) {
+	ph := strings.TrimSuffix(strings.Repeat("?,", n), ",")
+	args := make([]interface{}, n)
+	return ph, args
+}
+
+// DeleteByIDs 批量删除记录及其通道投递记录，返回实际删除的条数。
+// 上限校验（防误传超长列表）由 API 层负责，这里只管执行。
+func (s *Store) DeleteByIDs(ids []int64) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	ph, args := deletePlaceholder(len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	// 先删投递记录再删主表，顺序与 DeleteChannel 一致
+	if _, err := tx.Exec("DELETE FROM channel_deliveries WHERE message_id IN ("+ph+")", args...); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec("DELETE FROM messages WHERE id IN ("+ph+")", args...)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
+}
+
+// DeleteOlderThan 删除 ts 早于 cutoff（形如 2006-01-02）的记录及其通道投递记录。
+//
+// ts 带 +08 时区后缀，SQLite 的 date() 解析不了，所以用 substr(ts,1,10)
+// 做字符串比较 —— 与 Today() 同一套路，不能改成 date(ts)。
+// 删完顺手截断 WAL，避免大批删除后 -wal 文件只增不减（设备 eMMC 只有 3.3GB）。
+func (s *Store) DeleteOlderThan(cutoff string) (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		"DELETE FROM channel_deliveries WHERE message_id IN "+
+			"(SELECT id FROM messages WHERE substr(ts,1,10) < ?)", cutoff); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec("DELETE FROM messages WHERE substr(ts,1,10) < ?", cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	// 截断是尽力而为，失败不影响删除结果
+	_, _ = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	return n, nil
 }
 
 // ResetForward 让某条记录重新进入转发队列。

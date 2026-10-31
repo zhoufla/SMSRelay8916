@@ -19,10 +19,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,7 +34,9 @@ import (
 	"github.com/zhoufla/SMSRelay8916/internal/ddns"
 	"github.com/zhoufla/SMSRelay8916/internal/eventbus"
 	"github.com/zhoufla/SMSRelay8916/internal/forward"
+	"github.com/zhoufla/SMSRelay8916/internal/logbuf"
 	"github.com/zhoufla/SMSRelay8916/internal/modem"
+	"github.com/zhoufla/SMSRelay8916/internal/otp"
 	"github.com/zhoufla/SMSRelay8916/internal/store"
 	"github.com/zhoufla/SMSRelay8916/internal/sysinfo"
 )
@@ -180,6 +184,7 @@ type App struct {
 	cf       *ddns.Client
 	sys      *sysinfo.Collector
 	bus      *eventbus.Bus
+	logs     *logbuf.Buffer // 运行日志环形缓冲，供 /api/logs 查看
 	startTS  time.Time
 	hostname string
 
@@ -200,6 +205,10 @@ func main() {
 	)
 	flag.Parse()
 	log.SetFlags(log.LstdFlags)
+	// stderr 照常进 journald；内存环形缓冲给 Web 界面查看，容量固定自动淘汰，
+	// 持久化由 journal 负责，这里不需要额外的清理任务
+	ring := logbuf.New(500)
+	log.SetOutput(io.MultiWriter(os.Stderr, ring))
 
 	if *versionFlg {
 		fmt.Printf("smsrelay %s\n", Version)
@@ -238,6 +247,7 @@ func main() {
 		modem:    modem.New(cfg.ModemIndex),
 		sys:      sysinfo.New("wlan0", "wwan0"),
 		bus:      bus,
+		logs:     ring,
 		startTS:  time.Now(),
 		hostname: hostname,
 		events:   make(chan string, 512),
@@ -290,6 +300,9 @@ func main() {
 
 	// 5) DDNS：启动 15 秒后先跑一次，之后每 5 分钟一次
 	go app.ddnsLoop(ctx, 5*time.Minute)
+
+	// 6) 归档保留：按 retain_days 设置周期清理过期记录（设置里改为 0 即关闭）
+	go app.retentionLoop(ctx, 6*time.Hour)
 
 	// 5) HTTP
 	srv := &http.Server{
@@ -608,6 +621,9 @@ func (a *App) process(path string) {
 	}
 	if direction == "in" {
 		msg.DelayS = store.DeliveryDelay(ts)
+		// 提前算好验证码：Archive 里 Code 为空时也会算一次（幂等），
+		// 这里先填是为了下面的 SSE 事件能直接带上，不用重复提取
+		msg.Code = otp.Extract(body)
 	}
 
 	archived, err := a.store.Archive(msg)
@@ -644,6 +660,7 @@ func (a *App) process(path string) {
 			"dir":   direction,
 			"peer":  sms.Number,
 			"body":  body,
+			"code":  msg.Code,
 			"ts":    ts,
 			"state": state,
 		})
@@ -879,6 +896,7 @@ func (a *App) forwardBatch(ctx context.Context) {
 				OwnNumber: own,
 				Number:    m.Peer,
 				Body:      m.Body,
+				Code:      m.Code,
 				TS:        fmtForwardTime(m.TS),
 				ID:        m.ID,
 				Direction: m.Dir,
@@ -983,7 +1001,7 @@ func (a *App) Settings() interface{} {
 	}
 }
 
-// UpdateSettings 更新设置项。目前只支持 own_number。
+// UpdateSettings 更新设置项。目前支持 own_number 与 retain_days。
 func (a *App) UpdateSettings(kv map[string]string) error {
 	for k, v := range kv {
 		switch k {
@@ -995,6 +1013,22 @@ func (a *App) UpdateSettings(kv map[string]string) error {
 					return err
 				}
 			} else if err := a.store.SetSetting("own_number", v); err != nil {
+				return err
+			}
+		case "retain_days":
+			v = strings.TrimSpace(v)
+			if v == "" {
+				// 清空 = 回到默认（不清理）
+				if err := a.store.DeleteSetting("retain_days"); err != nil {
+					return err
+				}
+				break
+			}
+			days, err := strconv.Atoi(v)
+			if err != nil || days < 0 || days > 3650 {
+				return fmt.Errorf("保留天数必须是 0~3650 的整数（0 = 不自动清理）")
+			}
+			if err := a.store.SetSetting("retain_days", strconv.Itoa(days)); err != nil {
 				return err
 			}
 		default:
@@ -1044,6 +1078,82 @@ func (a *App) ResetForward(id int64) error {
 // DeleteMessage 删除一条归档记录。
 func (a *App) DeleteMessage(id int64) error {
 	return a.store.Delete(id)
+}
+
+// DeleteMessages 批量删除归档记录（API 层已做数量与空校验）。
+func (a *App) DeleteMessages(ids []int64) (int64, error) {
+	return a.store.DeleteByIDs(ids)
+}
+
+// CleanupNow 按当前 retain_days 设置立即清一次过期记录。
+// 未设置或为 0 时不动作，返回 0 —— 与「立即清理」按钮的语义一致。
+func (a *App) CleanupNow() (int64, error) {
+	days, ok, err := a.store.GetSetting("retain_days")
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(days)
+	if err != nil || n <= 0 {
+		return 0, nil
+	}
+	cutoff := time.Now().AddDate(0, 0, -n).Format("2006-01-02")
+	deleted, err := a.store.DeleteOlderThan(cutoff)
+	if err == nil && deleted > 0 {
+		log.Printf("手动清理: 删除 %d 条过期记录（保留 %d 天）", deleted, n)
+	}
+	return deleted, err
+}
+
+// Logs 返回内存环形缓冲里的运行日志。
+func (a *App) Logs(limit int, level string) []logbuf.Entry {
+	return a.logs.Snapshot(limit, level)
+}
+
+// retentionLoop 周期清理超过保留天数的归档记录。
+//
+// 放在 Go 进程内而不是 maint.sh：进程持有 DB 连接无需停服务，
+// 设备上也不保证有 sqlite3 CLI；maint.sh 保持 modem 侧单一职责。
+func (a *App) retentionLoop(ctx context.Context, iv time.Duration) {
+	// 启动后先等一会儿，避开开机时归档/转发都还没跑起来的阶段
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(15 * time.Minute):
+	}
+
+	t := time.NewTicker(iv)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			v, ok, err := a.store.GetSetting("retain_days")
+			if err != nil {
+				log.Printf("WARN 读取保留天数失败: %v", err)
+				continue
+			}
+			if !ok {
+				continue
+			}
+			days, err := strconv.Atoi(v)
+			if err != nil || days <= 0 {
+				continue
+			}
+			cutoff := time.Now().AddDate(0, 0, -days).Format("2006-01-02")
+			n, err := a.store.DeleteOlderThan(cutoff)
+			if err != nil {
+				log.Printf("WARN 周期清理失败: %v", err)
+				continue
+			}
+			if n > 0 {
+				log.Printf("周期清理: 删除 %d 条过期记录（保留 %d 天，早于 %s）", n, days, cutoff)
+			}
+		}
+	}
 }
 
 // Token 返回 API 访问口令，空表示不鉴权。

@@ -3,9 +3,27 @@
 # 用法:
 #   sms status             查看 modem / 号码 / 收发统计 / 投递延迟
 #   sms list [n]           最近 n 条（默认 10）
+#   sms code               最近 30 条里提取到验证码的消息
 #   sms send <号码> <内容>  发送（超长自动拆分）
 #   sms fwd-test           向所有启用通道发测试消息
-BASE="http://127.0.0.1:8088"
+#
+# 监听端口与接口口令自动从 /etc/smsrelay/config.json 读取：
+# listen_port 改了这里跟着变；api_token 设置后这里自动带上 X-Token 头。
+CONF="/etc/smsrelay/config.json"
+if [ -r "$CONF" ] && command -v jq >/dev/null 2>&1; then
+    PORT=$(jq -r '.listen_port // 8088' "$CONF" 2>/dev/null)
+    TOKEN=$(jq -r '.api_token // ""' "$CONF" 2>/dev/null)
+fi
+PORT="${PORT:-8088}"
+BASE="http://127.0.0.1:${PORT}"
+
+# 所有请求统一走 req()：配置了 api_token 就自动带鉴权头
+req() {
+    if [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ]; then
+        set -- -H "X-Token: $TOKEN" "$@"
+    fi
+    curl -s "$@"
+}
 
 need_jq() {
     command -v jq >/dev/null 2>&1 || { echo "需要 jq：apt-get install jq"; exit 1; }
@@ -14,7 +32,7 @@ need_jq() {
 case "$1" in
 status)
     need_jq
-    curl -s -m 10 "$BASE/api/status" | jq -r '
+    req -m 10 "$BASE/api/status" | jq -r '
       "modem   : \(.modem.state) / \(.modem.access_tech // "-") / signal \(.modem.signal // "-") / \(.modem.registration // "-")",
       "operator: \(.modem.operator // "-") \(.modem.operator_code // "") | imei \(.modem.imei // "-")",
       "sim     : \(.modem.imsi // "-") \(.modem.iccid // "-")",
@@ -27,8 +45,15 @@ status)
 list)
     need_jq
     N="${2:-10}"
-    curl -s -m 10 "$BASE/api/messages?limit=$N" | jq -r '
+    req -m 10 "$BASE/api/messages?limit=$N" | jq -r '
       .items[] | "[\(.dir)] \(.peer) \(.state) fw=\(.forwarded)  \((.body // "") | gsub("\n"; " ") | .[0:40])"
+    '
+    ;;
+code)
+    need_jq
+    req -m 10 "$BASE/api/messages?dir=in&limit=30&has_code=1" | jq -r '
+      if (.items | length) == 0 then "（最近 30 条收件里没有提取到验证码）" else empty end,
+      .items[] | "\(.code)  ← \(.peer)  \(.ts)\n    \((.body // "") | gsub("\n"; " ") | .[0:60])"
     '
     ;;
 send)
@@ -39,16 +64,16 @@ send)
     TMP=$(mktemp)
     # 用 jq 构造 JSON，号码与正文里的引号/换行一律安全
     jq -n --arg n "$NUM" --arg t "$*" '{number:$n,text:$t}' > "$TMP"
-    curl -s -m 90 -X POST "$BASE/api/send" -H 'Content-Type: application/json' \
+    req -m 90 -X POST "$BASE/api/send" -H 'Content-Type: application/json' \
          --data-binary "@$TMP"
     echo
     rm -f "$TMP"
     ;;
 fwd-test)
-    curl -s -m 20 -X POST "$BASE/api/forward-test" -H 'Content-Type: application/json' -d '{}'
+    req -m 20 -X POST "$BASE/api/forward-test" -H 'Content-Type: application/json' -d '{}'
     echo
     ;;
 *)
-    sed -n '2,7p' "$0"
+    sed -n '2,8p' "$0"
     ;;
 esac

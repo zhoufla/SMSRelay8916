@@ -75,6 +75,8 @@ D-Bus 上的 `state` / `pdu-type` 是原始 `uint32` 枚举，需要自己维护
 ```
 cmd/smsrelay/main.go          入口、配置、事件循环、状态机、发送、转发
 internal/store/store.go       SQLite 归档（表结构与 Python 版一致）
+internal/otp/otp.go           验证码提取（纯函数，上下文优先 + 克制的兜底）
+internal/logbuf/logbuf.go     运行日志内存环形缓冲（Web 端查看，journal 仍负责持久化）
 internal/modem/modem.go       mmcli 封装 + 状态解析
 internal/modem/watch.go       D-Bus 信号订阅
 internal/relay/dingtalk.go    钉钉机器人（限流 + 重试）
@@ -242,11 +244,33 @@ exec ./scripts/privacy-check.sh
 |---|---|---|
 | GET | `/api/ping` | 存活检查 |
 | GET | `/api/status` | modem 状态、SIM、统计、寻呼延迟 |
-| GET | `/api/messages?limit=30&offset=0&dir=in&q=关键词` | 分页查询 |
+| GET | `/api/messages?limit=30&offset=0&dir=in&q=关键词&has_code=1` | 分页查询；`has_code=1` 只看提取到验证码的 |
 | POST | `/api/send` | `{"number":"10086","text":"cxye"}` |
 | POST | `/api/forward-test` | 钉钉连通性测试 |
 | POST | `/api/forward` | `{"id":N}` 重新入队 |
 | DELETE | `/api/messages/{id}` | 删除归档记录 |
+| POST | `/api/messages/batch-delete` | `{"ids":[1,2,3]}` 批量删除（≤1000），连带投递记录 |
+| POST | `/api/maintenance/cleanup` | 按当前 `retain_days` 立即清一次过期记录 |
+| GET | `/api/logs?limit=300&level=warn` | 内存环形缓冲里的运行日志（最多 500 条） |
+
+### 验证码提取
+
+入站短信归档时自动提取验证码（`internal/otp`）：优先「验证码/校验码/code is」等关键词
+上下文，兜底仅当正文含验证类字样时取独立 4-8 位数字（跳过 `138****1234` 式打码段，
+11 位手机号因无词边界自然排除）。提取结果用于：列表高亮与一键复制、钉钉默认模板首行
+`验证码：xxxx`（正文没有验证码时模板不变）、SSE 事件与 CLI `sms code`。自定义 webhook
+模板可用 `{{code}}` / `{{code_json}}`。
+
+### 归档保留策略
+
+设置页「归档保留天数」（`retain_days`，0–3650，0 或留空 = 关闭）。开启后每 6 小时
+删除超过天数的归档记录及其通道投递记录，删完截断 WAL（设备只有 3.3GB eMMC）。
+设置页有「立即清理」按钮。`maint.sh` 保持 modem 侧单一职责，不参与。
+
+### 日志查看
+
+进程内 500 条环形缓冲（`internal/logbuf`）挂在 `log` 输出后，Web「日志」Tab 查看，
+支持 WARN 过滤。重启即清空，完整历史仍在设备上 `journalctl -u smsrelay`。
 
 ---
 
