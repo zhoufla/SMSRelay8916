@@ -8,12 +8,15 @@ import (
 	"crypto/sha1"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
-	_ "modernc.org/sqlite" // 纯 Go 实现，交叉编译不需要 cgo
+	_ "modernc.org/sqlite"
+
+	"github.com/zhoufla/SMSRelay8916/internal/forward"
 )
 
 // Message 对应 messages 表的一行。
@@ -581,4 +584,149 @@ func (s *Store) AllSettings() (map[string]string, error) {
 		out[k] = v
 	}
 	return out, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// 转发通道
+// ---------------------------------------------------------------------------
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+const channelCols = "id, name, type, enabled, config"
+
+func scanChannel(r rowScanner) (*forward.Channel, error) {
+	var (
+		c       forward.Channel
+		enabled int
+		cfgJSON string
+	)
+	if err := r.Scan(&c.ID, &c.Name, &c.Type, &enabled, &cfgJSON); err != nil {
+		return nil, err
+	}
+	c.Enabled = enabled != 0
+	if cfgJSON != "" {
+		_ = json.Unmarshal([]byte(cfgJSON), &c.Config)
+	}
+	return &c, nil
+}
+
+// ListChannels 列出通道。enabledOnly 为 true 时只返回启用的。
+func (s *Store) ListChannels(enabledOnly bool) ([]forward.Channel, error) {
+	q := "SELECT " + channelCols + " FROM channels"
+	if enabledOnly {
+		q += " WHERE enabled=1"
+	}
+	q += " ORDER BY id"
+
+	rows, err := s.db.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []forward.Channel
+	for rows.Next() {
+		c, err := scanChannel(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
+
+// GetChannel 按 id 取一条通道。
+func (s *Store) GetChannel(id int64) (*forward.Channel, error) {
+	row := s.db.QueryRow("SELECT "+channelCols+" FROM channels WHERE id=?", id)
+	c, err := scanChannel(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return c, err
+}
+
+// CreateChannel 新建通道，成功后回填 ID。
+func (s *Store) CreateChannel(c *forward.Channel) error {
+	b, err := json.Marshal(c.Config)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.Exec(
+		"INSERT INTO channels (name, type, enabled, config) VALUES (?,?,?,?)",
+		c.Name, c.Type, boolToInt(c.Enabled), string(b))
+	if err != nil {
+		return err
+	}
+	c.ID, _ = res.LastInsertId()
+	return nil
+}
+
+// UpdateChannel 更新通道。
+func (s *Store) UpdateChannel(c *forward.Channel) error {
+	b, err := json.Marshal(c.Config)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(
+		"UPDATE channels SET name=?, type=?, enabled=?, config=? WHERE id=?",
+		c.Name, c.Type, boolToInt(c.Enabled), string(b), c.ID)
+	return err
+}
+
+// DeleteChannel 删除通道及其投递记录。
+func (s *Store) DeleteChannel(id int64) error {
+	if _, err := s.db.Exec("DELETE FROM channels WHERE id=?", id); err != nil {
+		return err
+	}
+	_, err := s.db.Exec("DELETE FROM channel_deliveries WHERE channel_id=?", id)
+	return err
+}
+
+// ChannelCount 返回通道总数（用于判断是否需要从 config.json 迁移）。
+func (s *Store) ChannelCount() (int, error) {
+	var n int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM channels").Scan(&n)
+	return n, err
+}
+
+// DeliveryStatus 返回某条短信在某个通道上的投递状态（空表示还没投过）。
+func (s *Store) DeliveryStatus(messageID, channelID int64) string {
+	var st sql.NullString
+	err := s.db.QueryRow(
+		"SELECT status FROM channel_deliveries WHERE message_id=? AND channel_id=?",
+		messageID, channelID).Scan(&st)
+	if err != nil {
+		return ""
+	}
+	return st.String
+}
+
+// MarkDelivery 记录一次投递结果。
+func (s *Store) MarkDelivery(messageID, channelID int64, status, errMsg string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO channel_deliveries (message_id, channel_id, status, attempts, last_error, updated_at)
+		 VALUES (?,?,?,1,?,datetime('now','localtime'))
+		 ON CONFLICT(message_id, channel_id) DO UPDATE SET
+		   status=excluded.status,
+		   attempts=attempts+1,
+		   last_error=excluded.last_error,
+		   updated_at=excluded.updated_at`,
+		messageID, channelID, status, errMsg)
+	return err
+}
+
+// ResetDeliveries 清空某条短信的所有通道投递记录，让它重新入队。
+func (s *Store) ResetDeliveries(messageID int64) error {
+	_, err := s.db.Exec("DELETE FROM channel_deliveries WHERE message_id=?", messageID)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(
+		"UPDATE messages SET forwarded=0, attempts=0, forward_error=NULL WHERE id=?", messageID)
+	return err
 }

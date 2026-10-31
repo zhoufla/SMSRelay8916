@@ -100,8 +100,9 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
 .field{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}
 .field label{display:block;font-size:11.5px;color:var(--fg3);margin-bottom:6px}
 .field .hint{font-size:11px;color:var(--fg3);margin-top:7px;line-height:1.6}
-.field input,.field select{width:100%;background:var(--bg3);border:1px solid var(--line);border-radius:9px;
+.field input,.field select,.field textarea{width:100%;background:var(--bg3);border:1px solid var(--line);border-radius:9px;
   color:var(--fg);font:inherit;font-size:13.5px;padding:9px 11px;outline:0}
+.field textarea{height:76px;resize:vertical;line-height:1.5;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
 .field input:focus{border-color:var(--accent2)}
 .field .act{display:flex;gap:8px;margin-top:9px}
 .btn{padding:8px 16px;border:0;border-radius:9px;background:var(--accent2);color:#fff;
@@ -243,8 +244,45 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
     </div>
 
     <div class="sec-title">转发通道</div>
-    <div class="field">
-      <div class="hint">多通道配置（钉钉 / 自定义 webhook）将在下一阶段上线，当前仍使用配置文件里的钉钉设置。</div>
+    <div id="ch-list"></div>
+
+    <div class="field" id="ch-form" style="display:none">
+      <label>名称</label>
+      <input id="ch-name" placeholder="如 钉钉-家庭群">
+      <label style="margin-top:10px">类型</label>
+      <select id="ch-type">
+        <option value="dingtalk">钉钉机器人</option>
+        <option value="webhook">自定义 Webhook</option>
+      </select>
+      <label style="margin-top:10px">地址</label>
+      <input id="ch-url" placeholder="https://oapi.dingtalk.com/robot/send?access_token=...">
+      <div id="ch-dingtalk-fields">
+        <label style="margin-top:10px">加签密钥（可选，SEC 开头）</label>
+        <input id="ch-secret" placeholder="留空表示用关键词或 IP 白名单模式">
+        <label style="margin-top:10px">正文前缀</label>
+        <input id="ch-prefix" placeholder="【短信】">
+      </div>
+      <div id="ch-webhook-fields" style="display:none">
+        <label style="margin-top:10px">请求方法</label>
+        <input id="ch-method" placeholder="POST">
+        <label style="margin-top:10px">请求头（JSON，可选）</label>
+        <input id="ch-headers" placeholder='{"X-Token":"abc"}'>
+        <label style="margin-top:10px">正文模板</label>
+        <textarea id="ch-template" placeholder='{"from":"{{number}}","to":"{{own_number}}","text":"{{body_json}}"}'></textarea>
+        <div class="hint">
+          占位符：{{own_number}} 本机号、{{number}} 发送方、{{body}} 纯文本正文、
+          {{body_json}} 正文（已带引号，直接写 <code>"text": {{body_json}}</code>）、{{ts}}、{{id}}
+        </div>
+      </div>
+      <div class="act">
+        <button class="btn" id="ch-save">保存</button>
+        <button class="btn ghost" id="ch-cancel">取消</button>
+      </div>
+    </div>
+
+    <button class="btn" id="ch-add" style="width:100%">+ 新增通道</button>
+    <div class="hint" style="margin-top:8px">
+      短信会推送给所有启用的通道。每个通道的投递结果独立记录，某个通道故障不影响其它通道。
     </div>
 
     <div class="sec-title">访问</div>
@@ -297,7 +335,11 @@ function fmtTime(ts){
 async function api(path, opt){
   const r = await fetch(path, Object.assign({headers: Object.assign({'Content-Type':'application/json'}, H)}, opt||{}));
   if(r.status === 401){ const t = prompt('需要访问令牌'); if(t){ localStorage.setItem('smsgw_token', t); location.reload(); } throw new Error('unauthorized'); }
-  return r.json();
+  let data = {};
+  try{ data = await r.json(); }catch(_){ }
+  // 非 2xx 且后端给了 error 说明是业务/参数错误，抛出来让调用方 toast
+  if(!r.ok && data && data.error) throw new Error(data.error);
+  return data;
 }
 
 /* ---------------- 短信 ---------------- */
@@ -456,13 +498,100 @@ async function loadSettings(){
     $('#token-warn').style.display = s.api_token_set ? 'none' : 'block';
     $('#set-api').textContent = '接口口令：' + (s.api_token_set ? '已设置' : '未设置（任何人可访问）');
   }catch(e){ }
+  loadChannels();
 }
 async function saveOwnNumber(v){
   try{
     await api('/api/settings', {method:'PUT', body: JSON.stringify({own_number: v})});
     toast(v ? '已保存' : '已清空');
     loadSettings(); loadStatus();
-  }catch(e){ toast('保存失败'); }
+  }catch(e){ toast('保存失败：' + e.message); }
+}
+
+/* ---------------- 转发通道 ---------------- */
+let channels = [], editingCh = null;
+
+async function loadChannels(){
+  try{
+    const r = await api('/api/channels');
+    channels = r.items || [];
+    renderChannels();
+  }catch(e){ }
+}
+
+function renderChannels(){
+  if(!channels.length){
+    $('#ch-list').innerHTML = '<div class="field" style="color:var(--fg3);font-size:12.5px">还没有配置转发通道，短信只会入库，不会推送到外部。</div>';
+    return;
+  }
+  $('#ch-list').innerHTML = channels.map(c => {
+    const t = c.type === 'dingtalk' ? '钉钉' : 'Webhook';
+    return `<div class="field">
+      <div style="display:flex;align-items:center;gap:7px;margin-bottom:6px;flex-wrap:wrap">
+        <strong style="font-size:13.5px">${esc(c.name)}</strong>
+        <span class="badge ${c.enabled ? 'ok' : 'err'}">${c.enabled ? '启用' : '停用'}</span>
+        <span class="badge warn">${t}</span>
+      </div>
+      <div style="font-size:11px;color:var(--fg3);word-break:break-all;line-height:1.5">${esc(c.config.url)}</div>
+      <div class="act">
+        <button class="btn ghost" data-ch="edit" data-id="${c.id}">编辑</button>
+        <button class="btn ghost" data-ch="test" data-id="${c.id}">测试</button>
+        <button class="btn ghost" data-ch="del" data-id="${c.id}" style="color:var(--err)">删除</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function toggleChannelType(){
+  const t = $('#ch-type').value;
+  $('#ch-dingtalk-fields').style.display = t === 'dingtalk' ? 'block' : 'none';
+  $('#ch-webhook-fields').style.display = t === 'webhook' ? 'block' : 'none';
+}
+
+function openChannelForm(ch){
+  editingCh = ch || null;
+  $('#ch-form').style.display = 'block';
+  $('#ch-name').value = ch ? ch.name : '';
+  $('#ch-type').value = ch ? ch.type : 'dingtalk';
+  $('#ch-url').value = ch ? (ch.config.url || '') : '';
+  $('#ch-secret').value = ch ? (ch.config.secret || '') : '';
+  $('#ch-prefix').value = ch ? (ch.config.prefix || '') : '';
+  $('#ch-method').value = ch ? (ch.config.method || '') : '';
+  $('#ch-headers').value = (ch && ch.config.headers) ? JSON.stringify(ch.config.headers) : '';
+  $('#ch-template').value = ch ? (ch.config.body_template || '') : '';
+  toggleChannelType();
+  $('#ch-form').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+async function saveChannel(){
+  const type = $('#ch-type').value;
+  const cfg = { url: $('#ch-url').value.trim(), prefix: $('#ch-prefix').value.trim() };
+
+  if(type === 'dingtalk'){
+    const sec = $('#ch-secret').value.trim();
+    if(sec) cfg.secret = sec;
+  } else {
+    cfg.method = $('#ch-method').value.trim() || 'POST';
+    cfg.body_template = $('#ch-template').value;
+    const h = $('#ch-headers').value.trim();
+    if(h){
+      try{ cfg.headers = JSON.parse(h); }
+      catch(_){ toast('请求头不是合法 JSON'); return; }
+    }
+  }
+
+  const body = { name: $('#ch-name').value.trim(), type, enabled: editingCh ? editingCh.enabled : true, config: cfg };
+  try{
+    if(editingCh){
+      await api('/api/channels/' + editingCh.id, {method:'PUT', body: JSON.stringify(body)});
+    } else {
+      await api('/api/channels', {method:'POST', body: JSON.stringify(body)});
+    }
+    toast('已保存');
+    $('#ch-form').style.display = 'none';
+    editingCh = null;
+    loadChannels();
+  }catch(e){ toast('保存失败：' + e.message); }
 }
 
 /* ---------------- Tab ---------------- */
@@ -502,6 +631,34 @@ $('#fab').addEventListener('click', () => openCompose());
 $('#close').addEventListener('click', closeCompose);
 $('#own-save').addEventListener('click', () => saveOwnNumber($('#own-num').value.trim()));
 $('#own-clear').addEventListener('click', () => { $('#own-num').value = ''; saveOwnNumber(''); });
+
+$('#ch-add').addEventListener('click', () => openChannelForm(null));
+$('#ch-type').addEventListener('change', toggleChannelType);
+$('#ch-save').addEventListener('click', saveChannel);
+$('#ch-cancel').addEventListener('click', () => { $('#ch-form').style.display = 'none'; editingCh = null; });
+$('#ch-list').addEventListener('click', async e => {
+  const b = e.target.closest('button[data-ch]');
+  if(!b) return;
+  const id = +b.dataset.id;
+
+  if(b.dataset.ch === 'edit'){
+    const ch = channels.find(c => c.id === id);
+    if(ch) openChannelForm(ch);
+    return;
+  }
+  if(b.dataset.ch === 'test'){
+    b.disabled = true; b.textContent = '发送中…';
+    try{ await api('/api/channels/' + id + '/test', {method:'POST'}); toast('测试消息已发出'); }
+    catch(err){ toast('失败：' + err.message); }
+    b.disabled = false; b.textContent = '测试';
+    return;
+  }
+  if(b.dataset.ch === 'del'){
+    if(!confirm('删除这个通道？已归档的短信不受影响。')) return;
+    try{ await api('/api/channels/' + id, {method:'DELETE'}); loadChannels(); }
+    catch(err){ toast('删除失败：' + err.message); }
+  }
+});
 $('#list').addEventListener('click', async e => {
   const b = e.target.closest('button');
   if(b){

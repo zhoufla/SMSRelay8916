@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/zhoufla/SMSRelay8916/internal/eventbus"
+	"github.com/zhoufla/SMSRelay8916/internal/forward"
 	"github.com/zhoufla/SMSRelay8916/internal/store"
 )
 
@@ -82,6 +83,11 @@ type Backend interface {
 	ForwardTest() error
 	ResetForward(id int64) error
 	DeleteMessage(id int64) error
+	ListChannels() ([]forward.Channel, error)
+	CreateChannel(*forward.Channel) error
+	UpdateChannel(*forward.Channel) error
+	DeleteChannel(int64) error
+	TestChannel(int64) error
 	Token() string
 }
 
@@ -104,6 +110,20 @@ func New(b Backend, bus *eventbus.Bus, webDir string) *Server {
 }
 
 var idPattern = regexp.MustCompile(`^/api/messages/(\d+)$`)
+
+var (
+	channelIDRe   = regexp.MustCompile(`^/api/channels/(\d+)$`)
+	channelTestRe = regexp.MustCompile(`^/api/channels/(\d+)/test$`)
+)
+
+func pathID(re *regexp.Regexp, path string) int64 {
+	m := re.FindStringSubmatch(path)
+	if len(m) < 2 {
+		return 0
+	}
+	id, _ := strconv.ParseInt(m[1], 10, 64)
+	return id
+}
 
 // Handler 返回已装配路由的 http.Handler。
 func (s *Server) Handler() http.Handler {
@@ -164,6 +184,15 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodPut && path == "/api/settings":
 		s.updateSettings(w, r)
+
+	case path == "/api/channels" && r.Method == http.MethodGet:
+		s.listChannels(w)
+	case path == "/api/channels" && r.Method == http.MethodPost:
+		s.createChannel(w, r)
+	case channelTestRe.MatchString(path) && r.Method == http.MethodPost:
+		s.testChannel(w, r, pathID(channelTestRe, path))
+	case channelIDRe.MatchString(path):
+		s.channelByID(w, r, pathID(channelIDRe, path))
 
 	case r.Method == http.MethodGet && path == "/api/events":
 		s.events(w, r)
@@ -323,6 +352,64 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	// 回写完整设置，前端不用再发一次 GET
 	writeJSON(w, http.StatusOK, s.backend.Settings())
+}
+
+func (s *Server) listChannels(w http.ResponseWriter) {
+	chs, err := s.backend.ListChannels()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if chs == nil {
+		chs = []forward.Channel{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"items": chs})
+}
+
+func (s *Server) createChannel(w http.ResponseWriter, r *http.Request) {
+	var ch forward.Channel
+	if err := json.NewDecoder(r.Body).Decode(&ch); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
+		return
+	}
+	if err := s.backend.CreateChannel(&ch); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "id": ch.ID})
+}
+
+func (s *Server) channelByID(w http.ResponseWriter, r *http.Request, id int64) {
+	switch r.Method {
+	case http.MethodPut:
+		var ch forward.Channel
+		if err := json.NewDecoder(r.Body).Decode(&ch); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
+			return
+		}
+		ch.ID = id
+		if err := s.backend.UpdateChannel(&ch); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	case http.MethodDelete:
+		if err := s.backend.DeleteChannel(id); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	}
+}
+
+func (s *Server) testChannel(w http.ResponseWriter, r *http.Request, id int64) {
+	if err := s.backend.TestChannel(id); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]interface{}{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {

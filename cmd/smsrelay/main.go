@@ -30,8 +30,8 @@ import (
 
 	"github.com/zhoufla/SMSRelay8916/internal/api"
 	"github.com/zhoufla/SMSRelay8916/internal/eventbus"
+	"github.com/zhoufla/SMSRelay8916/internal/forward"
 	"github.com/zhoufla/SMSRelay8916/internal/modem"
-	"github.com/zhoufla/SMSRelay8916/internal/relay"
 	"github.com/zhoufla/SMSRelay8916/internal/store"
 	"github.com/zhoufla/SMSRelay8916/internal/sysinfo"
 )
@@ -175,7 +175,7 @@ type App struct {
 	cfgPath  string
 	store    *store.Store
 	modem    *modem.Client
-	relay    *relay.DingTalk
+	sender   *forward.Sender
 	sys      *sysinfo.Collector
 	bus      *eventbus.Bus
 	startTS  time.Time
@@ -241,11 +241,18 @@ func main() {
 		events:   make(chan string, 512),
 		states:   make(map[string]*smsState),
 	}
-	if cfg.DingTalk.Enabled && cfg.DingTalk.URL != "" {
-		app.relay = relay.NewDingTalk(cfg.DingTalk.URL, cfg.DingTalk.Prefix, cfg.DingTalk.MaxPerMin)
-		log.Printf("钉钉转发: 已启用（上限 %d 条/分钟）", cfg.DingTalk.MaxPerMin)
-	} else {
-		log.Printf("钉钉转发: 未启用")
+	app.sender = forward.NewSender()
+	app.migrateLegacyDingTalk()
+	if chs, err := app.store.ListChannels(true); err == nil {
+		if len(chs) > 0 {
+			names := make([]string, 0, len(chs))
+			for _, ch := range chs {
+				names = append(names, ch.Name)
+			}
+			log.Printf("转发通道: %d 个已启用（%s）", len(chs), strings.Join(names, "、"))
+		} else {
+			log.Printf("转发通道: 未配置")
+		}
 	}
 
 	if *checkFlag {
@@ -276,9 +283,7 @@ func main() {
 	go app.guardLoop(ctx)
 
 	// 4) 转发队列
-	if app.relay != nil {
-		go app.forwardLoop(ctx)
-	}
+	go app.forwardLoop(ctx)
 
 	// 5) HTTP
 	srv := &http.Server{
@@ -782,48 +787,106 @@ func splitBody(body string) []string {
 // 转发
 // ---------------------------------------------------------------------------
 
+// migrateLegacyDingTalk 把旧 config.json 里的钉钉配置迁移成一条通道记录。
+//
+// 只在 channels 表为空时执行一次，之后以数据库（也就是界面上配的）为准，
+// 这样升级不需要手工重配。
+func (a *App) migrateLegacyDingTalk() {
+	n, err := a.store.ChannelCount()
+	if err != nil || n > 0 {
+		return
+	}
+	if strings.TrimSpace(a.cfg.DingTalk.URL) == "" {
+		return
+	}
+	ch := &forward.Channel{
+		Name:    "钉钉",
+		Type:    forward.TypeDingTalk,
+		Enabled: a.cfg.DingTalk.Enabled,
+		Config: forward.Config{
+			URL:    a.cfg.DingTalk.URL,
+			Prefix: a.cfg.DingTalk.Prefix,
+		},
+	}
+	if err := a.store.CreateChannel(ch); err != nil {
+		log.Printf("WARN 迁移钉钉配置失败: %v", err)
+		return
+	}
+	log.Printf("已把 config.json 的钉钉配置迁移为通道 #%d（之后以界面配置为准）", ch.ID)
+}
+
+// forwardLoop 是多通道转发循环。
 func (a *App) forwardLoop(ctx context.Context) {
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			rows, err := a.store.PendingForward(5)
-			if err != nil {
-				log.Printf("WARN 读取转发队列失败: %v", err)
-				continue
-			}
-			for _, m := range rows {
-				if ctx.Err() != nil {
-					return
-				}
-				if err := a.relay.Send(a.formatForward(m)); err != nil {
-					_ = a.store.MarkForwardFailed(m.ID, err.Error())
-					log.Printf("forward #%d 失败: %v", m.ID, err)
-					continue
-				}
-				_ = a.store.MarkForwarded(m.ID)
-				log.Printf("forwarded #%d from %s", m.ID, m.Peer)
-			}
+			a.forwardBatch(ctx)
 		}
 	}
 }
 
-func (a *App) formatForward(m store.Message) string {
-	ts := m.TS
+// forwardBatch 取一批待转发短信，对每条短信遍历所有启用通道。
+//
+// 每个通道的成败单独记录在 channel_deliveries 里：重试时已经成功的通道会被跳过，
+// 不会因为某个通道挂了就把成功的那个反复重推。
+func (a *App) forwardBatch(ctx context.Context) {
+	msgs, err := a.store.PendingForward(5)
+	if err != nil || len(msgs) == 0 {
+		return
+	}
+	channels, err := a.store.ListChannels(true)
+	if err != nil || len(channels) == 0 {
+		return
+	}
+	own, _ := a.resolveOwnNumber(nil)
+
+	for _, m := range msgs {
+		if ctx.Err() != nil {
+			return
+		}
+		allOK := true
+		for _, ch := range channels {
+			if a.store.DeliveryStatus(m.ID, ch.ID) == "sent" {
+				continue
+			}
+			v := forward.Vars{
+				OwnNumber: own,
+				Number:    m.Peer,
+				Body:      m.Body,
+				TS:        fmtForwardTime(m.TS),
+				ID:        m.ID,
+				Direction: m.Dir,
+			}
+			if err := a.sender.Send(ch, v); err != nil {
+				_ = a.store.MarkDelivery(m.ID, ch.ID, "failed", err.Error())
+				log.Printf("forward #%d -> %s 失败: %v", m.ID, ch.Name, err)
+				allOK = false
+				continue
+			}
+			_ = a.store.MarkDelivery(m.ID, ch.ID, "sent", "")
+			log.Printf("forwarded #%d -> %s", m.ID, ch.Name)
+		}
+		if allOK {
+			_ = a.store.MarkForwarded(m.ID)
+		} else {
+			_ = a.store.MarkForwardFailed(m.ID, "部分通道投递失败")
+		}
+	}
+}
+
+// fmtForwardTime 把 2026-10-31T21:42:40+08 变成 2026-10-31 21:42:40。
+func fmtForwardTime(ts string) string {
 	if strings.Contains(ts, "T") {
 		ts = strings.Replace(ts, "T", " ", 1)
 		if len(ts) > 19 {
 			ts = ts[:19]
 		}
 	}
-	head := ""
-	if prefix := strings.TrimSpace(a.cfg.DingTalk.Prefix); prefix != "" {
-		head = prefix + " "
-	}
-	return fmt.Sprintf("%s收到短信\n号码：%s\n内容：%s\n时间：%s", head, m.Peer, m.Body, ts)
+	return ts
 }
 
 // ---------------------------------------------------------------------------
@@ -837,6 +900,7 @@ func (a *App) Status() api.StatusPayload {
 	today, _ := a.store.Today()
 	pg, _ := a.store.Paging24h()
 	own, src := a.resolveOwnNumber(st)
+	enabledChannels, _ := a.store.ListChannels(true)
 
 	return api.StatusPayload{
 		Modem:           st,
@@ -849,7 +913,7 @@ func (a *App) Status() api.StatusPayload {
 		Gateway: api.GatewayInfo{
 			Uptime:   int(time.Since(a.startTS).Seconds()),
 			Hostname: a.hostname,
-			DingTalk: a.relay != nil,
+			DingTalk: len(enabledChannels) > 0,
 			Version:  Version,
 		},
 	}
@@ -923,12 +987,31 @@ func (a *App) ListMessages(q store.ListQuery) ([]store.Message, int, error) {
 	return a.store.List(q)
 }
 
-// ForwardTest 发一条测试消息到钉钉。
+// ForwardTest 向所有启用的通道各发一条测试消息。
+// 返回第一条失败的错误，方便定位是哪个通道配错了。
 func (a *App) ForwardTest() error {
-	if a.relay == nil {
-		return fmt.Errorf("钉钉转发未启用")
+	chs, err := a.store.ListChannels(true)
+	if err != nil {
+		return err
 	}
-	return a.relay.Send(a.cfg.DingTalk.Prefix + "短信网关联通性测试")
+	if len(chs) == 0 {
+		return fmt.Errorf("没有启用的转发通道")
+	}
+	own, _ := a.resolveOwnNumber(nil)
+	v := forward.Vars{
+		OwnNumber: own,
+		Number:    "10086",
+		Body:      "短信网关联通性测试",
+		TS:        time.Now().Format("2006-01-02 15:04:05"),
+		Direction: "in",
+	}
+	var firstErr error
+	for _, ch := range chs {
+		if err := a.sender.Send(ch, v); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("%s: %w", ch.Name, err)
+		}
+	}
+	return firstErr
 }
 
 // ResetForward 让某条记录重新进入转发队列。
@@ -943,3 +1026,110 @@ func (a *App) DeleteMessage(id int64) error {
 
 // Token 返回 API 访问口令，空表示不鉴权。
 func (a *App) Token() string { return a.cfg.APIToken }
+
+// ---------------------------------------------------------------------------
+// 转发通道管理（api.Backend）
+// ---------------------------------------------------------------------------
+
+// ListChannels 返回所有通道，敏感字段已脱敏。
+//
+// 脱敏是必须的：URL 里带着 access_token，header 里可能带鉴权头。
+// 但脱敏后前端再提交回来时不能拿 **** 覆盖真值，所以 Update 时要做 merge。
+func (a *App) ListChannels() ([]forward.Channel, error) {
+	chs, err := a.store.ListChannels(false)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]forward.Channel, len(chs))
+	for i, ch := range chs {
+		ch.Config = forward.MaskSecret(ch.Config)
+		out[i] = ch
+	}
+	return out, nil
+}
+
+// CreateChannel 新建通道。
+func (a *App) CreateChannel(ch *forward.Channel) error {
+	if err := validateChannel(ch); err != nil {
+		return err
+	}
+	return a.store.CreateChannel(ch)
+}
+
+// UpdateChannel 更新通道。前端回传的脱敏占位会被替换成数据库里的原值。
+func (a *App) UpdateChannel(ch *forward.Channel) error {
+	old, err := a.store.GetChannel(ch.ID)
+	if err != nil {
+		return err
+	}
+	if old == nil {
+		return fmt.Errorf("通道不存在")
+	}
+	mergeMaskedConfig(&ch.Config, old.Config)
+	if err := validateChannel(ch); err != nil {
+		return err
+	}
+	return a.store.UpdateChannel(ch)
+}
+
+// DeleteChannel 删除通道。
+func (a *App) DeleteChannel(id int64) error {
+	return a.store.DeleteChannel(id)
+}
+
+// TestChannel 只测指定的那个通道，便于逐个排查配置。
+func (a *App) TestChannel(id int64) error {
+	ch, err := a.store.GetChannel(id)
+	if err != nil {
+		return err
+	}
+	if ch == nil {
+		return fmt.Errorf("通道不存在")
+	}
+	own, _ := a.resolveOwnNumber(nil)
+	return a.sender.Send(*ch, forward.Vars{
+		OwnNumber: own,
+		Number:    "10086",
+		Body:      "通道连通性测试",
+		TS:        time.Now().Format("2006-01-02 15:04:05"),
+		Direction: "in",
+	})
+}
+
+func validateChannel(ch *forward.Channel) error {
+	ch.Name = strings.TrimSpace(ch.Name)
+	if ch.Name == "" {
+		return fmt.Errorf("名称必填")
+	}
+	switch ch.Type {
+	case forward.TypeDingTalk, forward.TypeWebhook:
+	default:
+		return fmt.Errorf("类型必须是 dingtalk 或 webhook")
+	}
+	u := strings.TrimSpace(ch.Config.URL)
+	if u == "" {
+		return fmt.Errorf("地址必填")
+	}
+	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+		return fmt.Errorf("地址必须以 http:// 或 https:// 开头")
+	}
+	ch.Config.URL = u
+	return nil
+}
+
+// mergeMaskedConfig 把脱敏占位换回数据库里的真实值。
+func mergeMaskedConfig(dst *forward.Config, old forward.Config) {
+	if strings.Contains(dst.URL, "****") {
+		dst.URL = old.URL
+	}
+	if forward.IsMasked(dst.Secret) {
+		dst.Secret = old.Secret
+	}
+	for k, v := range dst.Headers {
+		if forward.IsMasked(v) {
+			if ov, ok := old.Headers[k]; ok {
+				dst.Headers[k] = ov
+			}
+		}
+	}
+}
