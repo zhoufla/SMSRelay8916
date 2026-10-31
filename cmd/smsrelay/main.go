@@ -635,13 +635,19 @@ func (a *App) process(path string) {
 
 	// 推送给前端。只带轻量字段即可 —— 页面收到后会重新拉一次列表拿完整记录，
 	// 这样不用在这里重复构造 Message（也就不会和数据库里的 id 对不上）。
-	a.bus.Publish("sms", map[string]interface{}{
-		"dir":   direction,
-		"peer":  sms.Number,
-		"body":  body,
-		"ts":    ts,
-		"state": state,
-	})
+	//
+	// 只有入站在这里推：出站由 sendOne 在拿到最终状态后推。
+	// 两边都推会让同一条短信产生两次事件（页面闪两下），而且出站的状态
+	// 只有 sendOne 知道，这里拿到的是中间态。
+	if direction == "in" {
+		a.bus.Publish("sms", map[string]interface{}{
+			"dir":   direction,
+			"peer":  sms.Number,
+			"body":  body,
+			"ts":    ts,
+			"state": state,
+		})
+	}
 
 	if direction == "in" {
 		preview := strings.ReplaceAll(body, "\n", " ")
@@ -736,6 +742,16 @@ func (a *App) sendOne(number, body string) api.SendPart {
 		state = "failed"
 	}
 	_ = a.modem.Delete(path)
+
+	// 出站消息在这里推事件：多端同时开着页面时，A 端发出的短信
+	// B 端也能立刻看到（SSE 已经取代轮询，不推就只能等兜底刷新）。
+	a.bus.Publish("sms", map[string]interface{}{
+		"dir":   "out",
+		"peer":  number,
+		"body":  body,
+		"ts":    ts,
+		"state": state,
+	})
 
 	return api.SendPart{
 		OK:        state == "sent",

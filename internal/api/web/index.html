@@ -269,10 +269,11 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
         <label style="margin-top:10px">请求头（JSON，可选）</label>
         <input id="ch-headers" placeholder='{"X-Token":"abc"}'>
         <label style="margin-top:10px">正文模板</label>
-        <textarea id="ch-template" placeholder='{"from":"{{number}}","to":"{{own_number}}","text":"{{body_json}}"}'></textarea>
+        <textarea id="ch-template" placeholder='{"own_number":{{own_number_json}},"from":{{number_json}},"text":{{body_json}},"ts":{{ts_json}},"id":{{id}},"dir":{{dir_json}}}'></textarea>
         <div class="hint">
-          占位符：{{own_number}} 本机号、{{number}} 发送方、{{body}} 纯文本正文、
-          {{body_json}} 正文（已带引号，直接写 <code>"text": {{body_json}}</code>）、{{ts}}、{{id}}
+          留空则使用上面这个默认模板。占位符：{{own_number}} 本机号、{{number}} 发送方、{{body}} 纯文本正文；
+          JSON 里请用对应的 <code>_json</code> 版本（<code>{{body_json}}</code> <b>已自带引号</b>，
+          直接写 <code>"text": {{body_json}}</code>，不要再套一层引号）、{{ts}}、{{id}}
         </div>
       </div>
       <div class="act">
@@ -583,10 +584,18 @@ function renderChannels(){
   }).join('');
 }
 
+// 与 Go 侧 forward.DefaultWebhookTemplate 保持一致。
+// 留空时后端就用这个模板，所以这里预先填上，让用户改之前能看到真实格式。
+const DEFAULT_WEBHOOK_TEMPLATE = '{"own_number":{{own_number_json}},"from":{{number_json}},"text":{{body_json}},"ts":{{ts_json}},"id":{{id}},"dir":{{dir_json}}}';
+
 function toggleChannelType(){
   const t = $('#ch-type').value;
   $('#ch-dingtalk-fields').style.display = t === 'dingtalk' ? 'block' : 'none';
   $('#ch-webhook-fields').style.display = t === 'webhook' ? 'block' : 'none';
+  // 切到 webhook 且模板为空时，预填默认模板（避免用户从零手写正则化的 JSON）
+  if(t === 'webhook' && !$('#ch-template').value.trim()){
+    $('#ch-template').value = DEFAULT_WEBHOOK_TEMPLATE;
+  }
 }
 
 function openChannelForm(ch){

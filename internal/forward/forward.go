@@ -63,14 +63,28 @@ type Vars struct {
 	TS        string // 时间
 	ID        int64  // 记录 id
 	Direction string // in / out
+	Prefix    string // 通道配置的前缀，由 Send 填入，不用于其它场景
 }
 
 // 默认模板：带本机号码。这正是「转发内容里要有收信号码」的落地方式。
 const defaultTemplate = "{{prefix}}收到短信\n收信号码：{{own_number}}\n发送号码：{{number}}\n内容：{{body}}\n时间：{{ts}}"
 
+// DefaultWebhookTemplate 是 webhook 通道没填正文模板时的兜底。
+//
+// 必须是**合法 JSON**：sendWebhook 以 application/json 发送，如果回退到
+// defaultTemplate（纯文本），收端会拿到一段无法解析的「JSON」——
+// 早期就是这么错的，而且报错发生在对方系统里，很难查。
+const DefaultWebhookTemplate = `{"own_number":{{own_number_json}},"from":{{number_json}},` +
+	`"text":{{body_json}},"ts":{{ts_json}},"id":{{id}},"dir":{{dir_json}}}`
+
 var placeholderRe = regexp.MustCompile(`\{\{(\w+)\}\}`)
 
 // Render 渲染模板。未知占位符原样保留，便于排查拼写错误。
+//
+// 每个字段都提供 xxx 与 xxx_json 两种形式：前者直接内插（用于纯文本模板），
+// 后者是带引号的 JSON 字符串字面量（用于 JSON 模板）。
+// 阶段一次性替换，替换进去的内容不会被再次当成占位符解析 ——
+// 这样短信正文里出现 "{{number}}" 也不会被二次替换。
 func Render(tmpl string, v Vars) string {
 	if tmpl == "" {
 		tmpl = defaultTemplate
@@ -79,21 +93,30 @@ func Render(tmpl string, v Vars) string {
 	if own == "" {
 		own = "未知"
 	}
+	// 前缀带尾随空格，模板里写 {{prefix}}收到短信 才能得到 "【短信】 收到短信"
+	prefix := ""
+	if p := strings.TrimSpace(v.Prefix); p != "" {
+		prefix = p + " "
+	}
+
 	vars := map[string]string{
 		"own_number": own,
 		"number":     v.Number,
 		"body":       v.Body,
-		"body_json":  jsonString(v.Body),
 		"ts":         v.TS,
 		"id":         strconv.FormatInt(v.ID, 10),
 		"dir":        v.Direction,
+		"prefix":     prefix,
+
+		"own_number_json": jsonString(own),
+		"number_json":     jsonString(v.Number),
+		"body_json":       jsonString(v.Body),
+		"ts_json":         jsonString(v.TS),
+		"dir_json":        jsonString(v.Direction),
+		"prefix_json":     jsonString(strings.TrimSpace(prefix)),
 	}
 	return placeholderRe.ReplaceAllStringFunc(tmpl, func(m string) string {
 		key := m[2 : len(m)-2]
-		// prefix 单独处理：它来自通道配置而不是 Vars
-		if key == "prefix" {
-			return m
-		}
 		if val, ok := vars[key]; ok {
 			return val
 		}
@@ -128,6 +151,8 @@ func NewSender() *Sender {
 
 // Send 按通道类型投递一条短信，返回错误表示失败。
 func (s *Sender) Send(ch Channel, v Vars) error {
+	// 前缀来自通道配置，统一交给模板渲染，避免"先渲染再字符串替换"这种两段式处理
+	v.Prefix = ch.Config.Prefix
 	switch ch.Type {
 	case TypeDingTalk:
 		return s.sendDingTalk(ch, v)
@@ -144,11 +169,6 @@ func (s *Sender) sendDingTalk(ch Channel, v Vars) error {
 	}
 
 	content := Render(defaultTemplate, v)
-	if p := strings.TrimSpace(ch.Config.Prefix); p != "" {
-		content = strings.Replace(content, "{{prefix}}", p+" ", 1)
-	} else {
-		content = strings.Replace(content, "{{prefix}}", "", 1)
-	}
 
 	payload := map[string]interface{}{
 		"msgtype": "text",
@@ -178,13 +198,12 @@ func (s *Sender) sendWebhook(ch Channel, v Vars) error {
 		return fmt.Errorf("webhook 地址为空")
 	}
 
-	body := Render(ch.Config.BodyTemplate, v)
-	// 模板里可能带 {{prefix}}，webhook 也支持
-	if p := strings.TrimSpace(ch.Config.Prefix); p != "" {
-		body = strings.Replace(body, "{{prefix}}", p+" ", 1)
-	} else {
-		body = strings.Replace(body, "{{prefix}}", "", 1)
+	// 没配模板时用合法 JSON 兜底，绝不回退到纯文本模板
+	tmpl := ch.Config.BodyTemplate
+	if strings.TrimSpace(tmpl) == "" {
+		tmpl = DefaultWebhookTemplate
 	}
+	body := Render(tmpl, v)
 
 	method := strings.ToUpper(strings.TrimSpace(ch.Config.Method))
 	if method == "" {

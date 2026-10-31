@@ -344,9 +344,14 @@ func Judge(rec Record, ip string) (string, string) {
 		return "unknown", "无法判断"
 	}
 
+	// 回环与未指定地址不分 v4/v6，一律挡掉（::1 曾被误判成"公网 IPv6 可达"）
+	if parsed.IsLoopback() || parsed.IsUnspecified() {
+		return "cgnat", "这是回环/未指定地址，不能作为公网记录"
+	}
+
 	isV4 := parsed.To4() != nil
 	if isV4 {
-		if isCGNAT(parsed) || parsed.IsPrivate() || parsed.IsLoopback() {
+		if isCGNAT(parsed) || parsed.IsPrivate() {
 			return "cgnat", "该地址不是公网 IPv4（CGNAT/私网），外部无法连入"
 		}
 		if rec.Source == "external" {
@@ -357,6 +362,15 @@ func Judge(rec Record, ip string) (string, string) {
 		return "ok", "本机公网 IPv4"
 	}
 
+	// 链路本地 / 未指定地址连「是不是公网」都谈不上，先挡掉。
+	// 早期只判断了 wwan0，导致 eth0 上的 fe80:: 也被标成「公网 IPv6，可达」。
+	if parsed.IsLinkLocalUnicast() || parsed.IsLinkLocalMulticast() || parsed.IsUnspecified() {
+		return "cgnat", "这是链路本地地址（fe80::/10），不能作为公网记录"
+	}
+	// Go 的 IsPrivate 对 IPv6 覆盖 fc00::/7（唯一本地地址）
+	if parsed.IsPrivate() {
+		return "cgnat", "这是唯一本地地址（fc00::/7），外部无法连入"
+	}
 	if strings.HasPrefix(rec.Source, "iface:wwan0") {
 		return "no-v6", "4G 的 IPv6 只下发地址、数据面不通，外部无法连入"
 	}
