@@ -1,0 +1,16 @@
+# 二进制与产物
+# 用 / 前缀锚定到仓库根目录：否则 "smsrelay" 会连带匹配 cmd/smsrelay/ 目录，
+# 把主程序源码一起忽略掉（踩过，git check-ignore 才能看出来）。
+/dist/
+/smsrelay
+/smsrelay.exe
+
+# 本地覆盖的配置（不要提交真实 token）
+config.json
+*.local.json
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+.DS_Store

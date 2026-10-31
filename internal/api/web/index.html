@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>短信网关 · jz02</title>
+<style>
+:root{
+  --bg:#0f1115; --bg2:#161a21; --bg3:#1d232c; --line:#262d38;
+  --fg:#e8ecf2; --fg2:#98a3b3; --fg3:#5f6b7d;
+  --accent:#4c9aff; --accent2:#1f6feb;
+  --in:#3ddc97; --out:#4c9aff; --warn:#f0a35e; --err:#f26d6d;
+  --radius:14px;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);
+  font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+body{padding-bottom:env(safe-area-inset-bottom)}
+.wrap{max-width:920px;margin:0 auto;padding:16px 14px 90px}
+
+/* 顶栏 */
+header{display:flex;align-items:center;gap:10px;padding:6px 2px 14px}
+.logo{width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,#4c9aff,#1f6feb);
+  display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:#fff;flex:0 0 auto}
+h1{font-size:16px;font-weight:650;margin:0;letter-spacing:.2px}
+h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-top:1px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--err);margin-left:auto;box-shadow:0 0 0 4px rgba(242,109,109,.12)}
+.dot.on{background:var(--in);box-shadow:0 0 0 4px rgba(61,220,151,.12)}
+
+/* 状态卡 */
+.status{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px}
+.sc{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:10px 11px;min-width:0}
+.sc .k{font-size:10.5px;color:var(--fg3);letter-spacing:.3px;margin-bottom:3px}
+.sc .v{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sc .v.dim{color:var(--fg2);font-weight:500}
+.bar{height:3px;border-radius:2px;background:var(--bg3);margin-top:7px;overflow:hidden}
+.bar i{display:block;height:100%;background:linear-gradient(90deg,#4c9aff,#3ddc97);width:0;transition:width .4s}
+
+/* 工具条 */
+.tools{display:flex;gap:8px;margin-bottom:12px;align-items:center}
+.seg{display:flex;background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:2px;flex:0 0 auto}
+.seg button{background:none;border:0;color:var(--fg2);font:inherit;font-size:12.5px;padding:6px 11px;border-radius:8px;cursor:pointer}
+.seg button.act{background:var(--bg3);color:var(--fg)}
+.search{flex:1;min-width:0;display:flex;align-items:center;gap:6px;background:var(--bg2);
+  border:1px solid var(--line);border-radius:10px;padding:0 10px;height:34px}
+.search input{flex:1;min-width:0;background:none;border:0;outline:0;color:var(--fg);font:inherit;font-size:13px}
+.search svg{flex:0 0 auto;opacity:.5}
+
+/* 列表 */
+.list{display:flex;flex-direction:column;gap:8px}
+.msg{background:var(--bg2);border:1px solid var(--line);border-radius:var(--radius);padding:11px 12px;
+  position:relative;overflow:hidden}
+.msg::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--line)}
+.msg.in::before{background:var(--in)}
+.msg.out::before{background:var(--out)}
+.mh{display:flex;align-items:center;gap:7px;margin-bottom:5px}
+.peer{font-weight:650;font-size:13.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.tag{font-size:10px;padding:1px 6px;border-radius:5px;background:var(--bg3);color:var(--fg2)}
+.tag.in{background:rgba(61,220,151,.12);color:var(--in)}
+.tag.out{background:rgba(76,154,255,.12);color:var(--out)}
+.tag.fw{background:rgba(240,163,94,.13);color:var(--warn)}
+.tag.err{background:rgba(242,109,109,.13);color:var(--err)}
+.time{margin-left:auto;font-size:11px;color:var(--fg3);white-space:nowrap}
+.body{font-size:13.5px;color:#cfd6e0;white-space:pre-wrap;word-break:break-word}
+.body.clip{display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}
+.mf{display:flex;gap:10px;margin-top:7px}
+.mf button{background:none;border:0;color:var(--fg3);font:inherit;font-size:11.5px;cursor:pointer;padding:0}
+.mf button:hover{color:var(--accent)}
+.empty{text-align:center;color:var(--fg3);padding:50px 0;font-size:13px}
+.more{display:block;width:100%;margin-top:12px;padding:11px;background:var(--bg2);border:1px solid var(--line);
+  border-radius:11px;color:var(--fg2);font:inherit;font-size:13px;cursor:pointer}
+
+/* 发送面板 */
+.compose{position:fixed;left:0;right:0;bottom:0;background:rgba(15,17,21,.94);
+  backdrop-filter:blur(14px);border-top:1px solid var(--line);padding:10px 14px calc(10px + env(safe-area-inset-bottom));
+  transform:translateY(110%);transition:transform .25s cubic-bezier(.4,0,.2,1)}
+.compose.open{transform:translateY(0)}
+.compose .inner{max-width:920px;margin:0 auto}
+.row{display:flex;gap:8px;margin-bottom:8px}
+.row input,.row textarea{background:var(--bg2);border:1px solid var(--line);border-radius:10px;
+  color:var(--fg);font:inherit;font-size:13.5px;padding:9px 11px;outline:0;width:100%}
+.row input:focus,.row textarea:focus{border-color:var(--accent2)}
+.row textarea{resize:none;height:70px;line-height:1.5}
+.cbtn{padding:9px 18px;border:0;border-radius:10px;background:var(--accent2);color:#fff;font:inherit;
+  font-size:13.5px;font-weight:600;cursor:pointer;white-space:nowrap}
+.cbtn:disabled{opacity:.45;cursor:not-allowed}
+.meta{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--fg3);margin-bottom:8px}
+.fab{position:fixed;right:16px;bottom:calc(16px + env(safe-area-inset-bottom));width:52px;height:52px;
+  border-radius:50%;border:0;background:linear-gradient(135deg,#4c9aff,#1f6feb);color:#fff;font-size:22px;
+  box-shadow:0 8px 24px rgba(31,111,235,.4);cursor:pointer;z-index:5;transition:transform .2s}
+.fab:active{transform:scale(.94)}
+.toast{position:fixed;left:50%;bottom:86px;transform:translate(-50%,20px);background:var(--bg3);
+  border:1px solid var(--line);color:var(--fg);padding:9px 16px;border-radius:10px;font-size:12.5px;
+  opacity:0;pointer-events:none;transition:.25s;z-index:10;max-width:80vw;text-align:center}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+@media(max-width:520px){.status{grid-template-columns:repeat(2,1fr)}h1 small{display:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">S</div>
+    <h1>短信网关<small id="host">jz02v10 · ModemManager</small></h1>
+    <div class="dot" id="dot"></div>
+  </header>
+
+  <div class="status">
+    <div class="sc"><div class="k">信号</div><div class="v" id="s-sig">--</div><div class="bar"><i id="s-bar"></i></div></div>
+    <div class="sc"><div class="k">网络</div><div class="v" id="s-net">--</div></div>
+    <div class="sc"><div class="k">今日 收 / 发</div><div class="v" id="s-today">--</div></div>
+    <div class="sc"><div class="k">累计归档</div><div class="v" id="s-cnt">--</div></div>
+  </div>
+
+  <div class="tools">
+    <div class="seg" id="seg">
+      <button data-dir="" class="act">全部</button>
+      <button data-dir="in">收件</button>
+      <button data-dir="out">已发</button>
+    </div>
+    <label class="search">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <input id="q" placeholder="搜索号码或内容" autocomplete="off">
+    </label>
+  </div>
+
+  <div class="list" id="list"><div class="empty">加载中…</div></div>
+  <button class="more" id="more" style="display:none">加载更多</button>
+</div>
+
+<button class="fab" id="fab">+</button>
+
+<div class="compose" id="compose">
+  <div class="inner">
+    <div class="row">
+      <input id="to" placeholder="接收号码，如 10086" inputmode="tel">
+      <button class="cbtn" id="send">发送</button>
+    </div>
+    <div class="row"><textarea id="txt" placeholder="短信内容，支持中文与换行"></textarea></div>
+    <div class="meta">
+      <span id="count">0 字</span><span id="parts"></span>
+      <span style="margin-left:auto;cursor:pointer" id="testfw">测试钉钉</span>
+      <span style="cursor:pointer" id="close">收起</span>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let dir = "", offset = 0, limit = 30, total = 0, timer = null, loading = false;
+const TOKEN = localStorage.getItem('smsgw_token') || '';
+const H = TOKEN ? {'X-Token': TOKEN} : {};
+
+function toast(msg, ms = 2600){
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), ms);
+}
+function esc(s){ return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function fmtTime(ts){
+  if(!ts) return '';
+  const m = String(ts).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if(!m) return ts;
+  const today = new Date();
+  const sameDay = +m[2] === today.getMonth()+1 && +m[3] === today.getDate();
+  return sameDay ? `${m[4]}:${m[5]}` : `${m[2]}-${m[3]} ${m[4]}:${m[5]}`;
+}
+async function api(path, opt){
+  const r = await fetch(path, Object.assign({headers: Object.assign({'Content-Type':'application/json'}, H)}, opt||{}));
+  if(r.status === 401){ const t = prompt('需要访问令牌'); if(t){ localStorage.setItem('smsgw_token', t); location.reload(); } throw new Error('unauthorized'); }
+  return r.json();
+}
+
+async function loadStatus(){
+  try{
+    const s = await api('/api/status');
+    $('#dot').classList.add('on');
+    $('#host').textContent = `${s.gateway.hostname} · ${s.own_number || '--'} · ${s.modem.operator || '--'}`;
+    const sig = s.modem.signal;
+    $('#s-sig').textContent = (sig == null) ? '无信号' : (sig + '%');
+    $('#s-bar').style.width = (sig == null ? 0 : sig) + '%';
+    const tech = (s.modem.access_tech || '--').toUpperCase();
+    $('#s-net').textContent = tech.includes('LTE') ? 'LTE' : tech.split(',')[0];
+    $('#s-net').title = `${s.modem.state} / ${s.modem.registration} / PS ${s.modem.ps_state}`;
+    const t = s.today || {};
+    $('#s-today').textContent = `${t.inbox || 0} / ${t.sent || 0}`;
+    $('#s-today').title = s.last_inbound ? ('最近收到：' + s.last_inbound) : '今日收发条数';
+    $('#s-cnt').textContent = s.counts.total;
+  }catch(e){
+    $('#dot').classList.remove('on');
+  }
+}
+
+function render(items){
+  if(!items.length){ $('#list').innerHTML = '<div class="empty">没有短信</div>'; return; }
+  $('#list').innerHTML = items.map(m => {
+    const cls = m.dir === 'in' ? 'in' : 'out';
+    let tags = `<span class="tag ${cls}">${m.dir === 'in' ? '收' : '发'}</span>`;
+    if(m.dir === 'out'){
+      if(m.state === 'failed') tags += `<span class="tag err">发送失败</span>`;
+      else if(m.state === 'queued' || m.state === '--') tags += `<span class="tag">发送中</span>`;
+    }
+    if(m.dir === 'in'){
+      if(m.forwarded == 1) tags += `<span class="tag">已转发</span>`;
+      else if(m.forwarded == 2) tags += `<span class="tag err" title="${esc(m.forward_error||'')}">转发失败</span>`;
+      else tags += `<span class="tag fw">待转发</span>`;
+    }
+    return `<div class="msg ${cls}">
+      <div class="mh"><span class="peer">${esc(m.peer)}</span>${tags}
+        <span class="time">${fmtTime(m.ts)}</span></div>
+      <div class="body clip" data-id="${m.id}">${esc(m.body)}</div>
+      <div class="mf">
+        <button data-act="re" data-id="${m.id}">回复</button>
+        ${m.dir === 'in' && m.forwarded != 1 ? `<button data-act="fw" data-id="${m.id}">重新转发</button>` : ''}
+        <button data-act="del" data-id="${m.id}">删除</button>
+      </div>
+    </div>`;
+  }).join('');
+  $('#more').style.display = (offset + items.length < total) ? 'block' : 'none';
+}
+
+async function loadMessages(reset){
+  if(loading) return; loading = true;
+  if(reset){ offset = 0; }
+  const q = encodeURIComponent($('#q').value.trim());
+  try{
+    const r = await api(`/api/messages?limit=${limit}&offset=${offset}&dir=${dir}&q=${q}`);
+    total = r.total;
+    if(reset) render(r.items);
+    else {
+      const cur = $('#list').innerHTML;
+      render(r.items);
+      $('#list').innerHTML = cur + $('#list').innerHTML;
+    }
+    offset += r.items.length;
+    $('#more').style.display = (offset < total) ? 'block' : 'none';
+  }catch(e){ }
+  loading = false;
+}
+
+function openCompose(to){
+  $('#compose').classList.add('open');
+  if(to){ $('#to').value = to; $('#txt').focus(); } else { $('#to').focus(); }
+  setTimeout(() => document.querySelector('.wrap').style.paddingBottom = '230px', 50);
+}
+function closeCompose(){
+  $('#compose').classList.remove('open');
+  document.querySelector('.wrap').style.paddingBottom = '90px';
+}
+
+$('#seg').addEventListener('click', e => {
+  const b = e.target.closest('button'); if(!b) return;
+  [...$('#seg').children].forEach(x => x.classList.remove('act'));
+  b.classList.add('act'); dir = b.dataset.dir;
+  loadMessages(true);
+});
+$('#q').addEventListener('input', () => { clearTimeout(window._qt); window._qt = setTimeout(() => loadMessages(true), 350); });
+$('#more').addEventListener('click', () => loadMessages(false));
+$('#fab').addEventListener('click', () => openCompose());
+$('#close').addEventListener('click', closeCompose);
+$('#list').addEventListener('click', async e => {
+  const b = e.target.closest('button');
+  if(b){
+    const id = b.dataset.id;
+    if(b.dataset.act === 're'){
+      const peer = b.closest('.msg').querySelector('.peer').textContent;
+      openCompose(peer); return;
+    }
+    if(b.dataset.act === 'del'){
+      if(!confirm('删除这条记录？')) return;
+      await api('/api/messages/' + id, {method: 'DELETE'});
+      loadMessages(true); loadStatus(); return;
+    }
+    if(b.dataset.act === 'fw'){
+      await api('/api/forward', {method: 'POST', body: JSON.stringify({id})});
+      toast('已重新加入转发队列'); loadMessages(true); return;
+    }
+  }
+  const body = e.target.closest('.body');
+  if(body) body.classList.toggle('clip');
+});
+function updateCount(){
+  const t = $('#txt').value;
+  $('#count').textContent = t.length + ' 字';
+  const gsm = /^[\x20-\x7e\n\r]*$/.test(t);
+  const limit = gsm ? 160 : 70;
+  const n = t.length ? Math.ceil(t.length / limit) : 0;
+  $('#parts').textContent = n > 1 ? `将拆分为 ${n} 条` : '';
+}
+$('#txt').addEventListener('input', updateCount);
+$('#send').addEventListener('click', async () => {
+  const number = $('#to').value.trim(), text = $('#txt').value.trim();
+  if(!number || !text){ toast('号码和内容都要填'); return; }
+  if(!confirm(`确认发送到 ${number}？`)) return;
+  const btn = $('#send'); btn.disabled = true; btn.textContent = '发送中';
+  try{
+    const r = await api('/api/send', {method: 'POST', body: JSON.stringify({number, text})});
+    if(r.ok){ toast('发送成功' + (r.parts > 1 ? `（${r.parts} 条）` : '')); $('#txt').value = ''; updateCount(); closeCompose(); }
+    else { const e = (r.results || []).map(x => x.error || x.state).join('; '); toast('发送失败：' + (r.error || e)); }
+  }catch(e){ toast('请求失败'); }
+  btn.disabled = false; btn.textContent = '发送';
+  loadMessages(true); loadStatus();
+});
+$('#testfw').addEventListener('click', async () => {
+  try{
+    const r = await api('/api/forward-test', {method: 'POST', body: '{}'});
+    toast(r.ok ? '钉钉测试已发出' : ('钉钉失败：' + r.error));
+  }catch(e){ toast('请求失败'); }
+});
+
+loadStatus(); loadMessages(true);
+timer = setInterval(() => { loadStatus(); loadMessages(true); }, 6000);
+document.addEventListener('visibilitychange', () => {
+  if(document.hidden){ clearInterval(timer); timer = null; }
+  else if(!timer){ loadStatus(); loadMessages(true); timer = setInterval(() => { loadStatus(); loadMessages(true); }, 6000); }
+});
+</script>
+</body>
+</html>

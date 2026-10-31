@@ -1,0 +1,24 @@
+[Unit]
+Description=SMSRelay8916 SMS gateway (jz02v10 / MSM8916)
+Documentation=https://github.com/zhoufla/SMSRelay8916
+After=ModemManager.service
+Wants=ModemManager.service
+
+[Service]
+Type=simple
+ExecStart=/opt/smsrelay/smsrelay
+Environment=SMSRELAY_CONFIG=/etc/smsrelay/config.json
+Restart=always
+RestartSec=10
+TimeoutStopSec=10
+
+# 实际常驻约 10~14MB，给 64MB 上限足够，同时防止内存异常增长拖垮整机
+MemoryMax=64M
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

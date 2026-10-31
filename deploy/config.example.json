@@ -1,0 +1,16 @@
+{
+  "listen_host": "0.0.0.0",
+  "listen_port": 8088,
+  "api_token": "",
+  "db_path": "/var/lib/sms-gw/sms.db",
+  "guard_interval": 60,
+  "modem_index": "0",
+  "web_dir": "/opt/smsrelay/web",
+  "own_number": "",
+  "dingtalk": {
+    "enabled": false,
+    "url": "https://oapi.dingtalk.com/robot/send?access_token=REPLACE_ME",
+    "prefix": "【短信】",
+    "max_per_min": 15
+  }
+}
