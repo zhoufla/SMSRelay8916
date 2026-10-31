@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/zhoufla/SMSRelay8916/internal/api"
+	"github.com/zhoufla/SMSRelay8916/internal/eventbus"
 	"github.com/zhoufla/SMSRelay8916/internal/modem"
 	"github.com/zhoufla/SMSRelay8916/internal/relay"
 	"github.com/zhoufla/SMSRelay8916/internal/store"
@@ -176,6 +177,7 @@ type App struct {
 	modem    *modem.Client
 	relay    *relay.DingTalk
 	sys      *sysinfo.Collector
+	bus      *eventbus.Bus
 	startTS  time.Time
 	hostname string
 
@@ -226,12 +228,14 @@ func main() {
 	log.Printf("归档库: %s", cfg.DBPath)
 
 	hostname, _ := os.Hostname()
+	bus := eventbus.New()
 	app := &App{
 		cfg:      cfg,
 		cfgPath:  usedPath,
 		store:    st,
 		modem:    modem.New(cfg.ModemIndex),
 		sys:      sysinfo.New("wlan0", "wwan0"),
+		bus:      bus,
 		startTS:  time.Now(),
 		hostname: hostname,
 		events:   make(chan string, 512),
@@ -254,8 +258,13 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 0) 系统指标采样：5 秒一次，结果缓存，HTTP 请求直接读缓存
-	go app.sys.Start(ctx, 5*time.Second, nil)
+	// 0) 系统指标采样：5 秒一次，结果缓存，并推送给 SSE 订阅者
+	go app.sys.Start(ctx, 5*time.Second, func(s *sysinfo.Snapshot) {
+		app.bus.Publish("system", s)
+	})
+
+	// 0b) modem 状态巡检：60 秒一次，只在关键字段变化时推送
+	go app.modemWatch(ctx, 60*time.Second)
 
 	// 1) 事件处理 worker（串行，避免同一对象被并发读写）
 	go app.worker(ctx)
@@ -274,7 +283,7 @@ func main() {
 	// 5) HTTP
 	srv := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.ListenHost, cfg.ListenPort),
-		Handler:           api.New(app, cfg.WebDir).Handler(),
+		Handler:           api.New(app, bus, cfg.WebDir).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      120 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -459,6 +468,31 @@ func (a *App) guardLoop(ctx context.Context) {
 	}
 }
 
+// modemWatch 周期性检查 modem 关键状态，只在真正变化时推送。
+//
+// 60 秒一次而不是更频繁：每次检查要 spawn 两个 mmcli（约 110ms），
+// 而信号强度这类数值本来就不需要秒级刷新。
+func (a *App) modemWatch(ctx context.Context, iv time.Duration) {
+	t := time.NewTicker(iv)
+	defer t.Stop()
+
+	last := ""
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			st := a.modem.Status()
+			sig := st.State + "|" + st.Registration + "|" + st.AccessTech + "|" + st.PSState
+			if sig == last {
+				continue
+			}
+			last = sig
+			a.bus.Publish("modem", st)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 单条短信处理（核心状态机）
 // ---------------------------------------------------------------------------
@@ -587,6 +621,16 @@ func (a *App) process(path string) {
 	a.mu.Lock()
 	delete(a.states, path)
 	a.mu.Unlock()
+
+	// 推送给前端。只带轻量字段即可 —— 页面收到后会重新拉一次列表拿完整记录，
+	// 这样不用在这里重复构造 Message（也就不会和数据库里的 id 对不上）。
+	a.bus.Publish("sms", map[string]interface{}{
+		"dir":   direction,
+		"peer":  sms.Number,
+		"body":  body,
+		"ts":    ts,
+		"state": state,
+	})
 
 	if direction == "in" {
 		preview := strings.ReplaceAll(body, "\n", " ")

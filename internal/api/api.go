@@ -16,8 +16,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/zhoufla/SMSRelay8916/internal/eventbus"
 	"github.com/zhoufla/SMSRelay8916/internal/store"
 )
 
@@ -86,12 +88,19 @@ type Backend interface {
 // Server 是 HTTP 服务。
 type Server struct {
 	backend Backend
+	bus     *eventbus.Bus
 	webDir  string // 若存在外部 web 目录则优先使用，便于改页面不用重编译
+
+	mu      sync.Mutex
+	sseSubs int // 当前 SSE 连接数，防止被误用拖出几百个 goroutine
 }
 
+// maxSSE 是同时允许的 SSE 连接上限。
+const maxSSE = 8
+
 // New 创建 HTTP 服务。webDir 可为空。
-func New(b Backend, webDir string) *Server {
-	return &Server{backend: b, webDir: webDir}
+func New(b Backend, bus *eventbus.Bus, webDir string) *Server {
+	return &Server{backend: b, bus: bus, webDir: webDir}
 }
 
 var idPattern = regexp.MustCompile(`^/api/messages/(\d+)$`)
@@ -155,6 +164,9 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodPut && path == "/api/settings":
 		s.updateSettings(w, r)
+
+	case r.Method == http.MethodGet && path == "/api/events":
+		s.events(w, r)
 
 	case r.Method == http.MethodGet && path == "/api/messages":
 		s.listMessages(w, r)
@@ -224,6 +236,79 @@ func (s *Server) serveIndex(w http.ResponseWriter) {
 		}
 	}
 	writeHTML(w, embeddedIndex)
+}
+
+// events 是 SSE 端点。
+//
+// 选 SSE 而不是 WebSocket：页面只需要服务器单向推送，而 EventSource 是浏览器
+// 原生支持且自带重连，不需要握手库、不需要额外依赖，也不需要维护连接状态机。
+func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError,
+			map[string]string{"error": "当前服务器不支持流式响应"})
+		return
+	}
+
+	s.mu.Lock()
+	if s.sseSubs >= maxSSE {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusServiceUnavailable,
+			map[string]string{"error": fmt.Sprintf("SSE 连接数已达上限 %d", maxSSE)})
+		return
+	}
+	s.sseSubs++
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.sseSubs--
+		s.mu.Unlock()
+	}()
+
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
+	h.Set("Connection", "keep-alive")
+	// 关掉反向代理缓冲，否则事件会被攒着一起发
+	h.Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	id, ch := s.bus.Subscribe()
+	defer s.bus.Unsubscribe(id)
+
+	// 首帧带完整状态，客户端不用再单独发几个请求
+	if hello, err := json.Marshal(map[string]interface{}{
+		"status": s.backend.Status(),
+		"system": s.backend.System(),
+	}); err == nil {
+		fmt.Fprintf(w, "event: hello\ndata: %s\n\n", hello)
+		flusher.Flush()
+	}
+
+	heartbeat := time.NewTicker(25 * time.Second)
+	defer heartbeat.Stop()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-heartbeat.C:
+			// 注释行心跳：客户端忽略内容，但能防止中间设备按空闲超时断开
+			fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			data, err := json.Marshal(ev.Data)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, data)
+			flusher.Flush()
+		}
+	}
 }
 
 func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {

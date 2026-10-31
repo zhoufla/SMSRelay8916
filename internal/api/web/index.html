@@ -277,7 +277,7 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
 <script>
 const $ = s => document.querySelector(s);
 let dir = "", offset = 0, limit = 30, total = 0, timer = null, loading = false;
-let curTab = 'sms', sysTimer = null;
+let curTab = 'sms', es = null, esOK = false;
 const TOKEN = localStorage.getItem('smsgw_token') || '';
 const H = TOKEN ? {'X-Token': TOKEN} : {};
 
@@ -301,23 +301,28 @@ async function api(path, opt){
 }
 
 /* ---------------- 短信 ---------------- */
+let lastStatus = null;
+function renderStatus(s){
+  if(!s || !s.modem) return;
+  lastStatus = s;
+  $('#host').textContent = `${s.gateway.hostname} · ${s.own_number || '--'} · ${s.modem.operator || '--'}`;
+  const sig = s.modem.signal;
+  $('#s-sig').textContent = (sig == null) ? '无信号' : (sig + '%');
+  $('#s-bar').style.width = (sig == null ? 0 : sig) + '%';
+  const tech = (s.modem.access_tech || '--').toUpperCase();
+  $('#s-net').textContent = tech.includes('LTE') ? 'LTE' : tech.split(',')[0];
+  $('#s-net').title = `${s.modem.state} / ${s.modem.registration} / PS ${s.modem.ps_state}`;
+  const t = s.today || {};
+  $('#s-today').textContent = `${t.inbox || 0} / ${t.sent || 0}`;
+  $('#s-today').title = s.last_inbound ? ('最近收到：' + s.last_inbound) : '今日收发条数';
+  $('#s-cnt').textContent = s.counts.total;
+}
 async function loadStatus(){
   try{
-    const s = await api('/api/status');
+    renderStatus(await api('/api/status'));
     $('#dot').classList.add('on');
-    $('#host').textContent = `${s.gateway.hostname} · ${s.own_number || '--'} · ${s.modem.operator || '--'}`;
-    const sig = s.modem.signal;
-    $('#s-sig').textContent = (sig == null) ? '无信号' : (sig + '%');
-    $('#s-bar').style.width = (sig == null ? 0 : sig) + '%';
-    const tech = (s.modem.access_tech || '--').toUpperCase();
-    $('#s-net').textContent = tech.includes('LTE') ? 'LTE' : tech.split(',')[0];
-    $('#s-net').title = `${s.modem.state} / ${s.modem.registration} / PS ${s.modem.ps_state}`;
-    const t = s.today || {};
-    $('#s-today').textContent = `${t.inbox || 0} / ${t.sent || 0}`;
-    $('#s-today').title = s.last_inbound ? ('最近收到：' + s.last_inbound) : '今日收发条数';
-    $('#s-cnt').textContent = s.counts.total;
   }catch(e){
-    $('#dot').classList.remove('on');
+    if(!esOK) $('#dot').classList.remove('on');
   }
 }
 
@@ -387,10 +392,8 @@ function pctColor(el, v, hot){
   el.style.width = Math.max(0, Math.min(100, v)) + '%';
 }
 
-async function loadSystem(){
-  try{
-    const s = await api('/api/system');
-    if(!s || !s.cpu){ return; }
+function renderSystem(s){
+  if(!s || !s.cpu) return;
 
     $('#m-cpu').textContent = (s.cpu.percent || 0).toFixed(1);
     const l = s.cpu.load || [0,0,0];
@@ -433,7 +436,10 @@ async function loadSystem(){
       <div class="rw"><span class="k">进程</span><span class="v">${p.running || 0} 运行 / ${p.total || 0} 总计</span></div>
       <div class="rw"><span class="k">交换分区</span><span class="v">${m.swap_used_mb || 0} / ${m.swap_total_mb || 0} MB</span></div>`;
     $('#m-ts').textContent = '更新于 ' + (s.ts || '').replace('T', ' ').slice(0, 19);
-  }catch(e){ }
+}
+
+async function loadSystem(){
+  try{ renderSystem(await api('/api/system')); }catch(e){ }
 }
 
 /* ---------------- 设置 ---------------- */
@@ -546,21 +552,73 @@ $('#testfw').addEventListener('click', async () => {
   }catch(e){ toast('请求失败'); }
 });
 
+/* ---------------- SSE 实时推送 ---------------- */
+function connectSSE(){
+  if(es){ try{ es.close(); }catch(_){} }
+  const url = '/api/events' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
+  try { es = new EventSource(url); } catch(_){ esOK = false; return; }
+
+  es.addEventListener('hello', e => {
+    esOK = true;
+    $('#dot').classList.add('on');
+    try{
+      const d = JSON.parse(e.data);
+      if(d.status) renderStatus(d.status);
+      if(d.system && curTab === 'sys') renderSystem(d.system);
+    }catch(_){}
+  });
+
+  es.addEventListener('sms', e => {
+    let m = null;
+    try{ m = JSON.parse(e.data); }catch(_){}
+    onNewSMS(m);
+  });
+
+  es.addEventListener('system', e => {
+    if(curTab !== 'sys') return;
+    try{ renderSystem(JSON.parse(e.data)); }catch(_){}
+  });
+
+  es.addEventListener('modem', e => {
+    try{
+      const st = JSON.parse(e.data);
+      if(lastStatus) renderStatus(Object.assign({}, lastStatus, {modem: st}));
+    }catch(_){}
+  });
+
+  // EventSource 自带重连（约 3 秒一次），这里不手动重建，避免把服务端打爆
+  es.onerror = () => {
+    esOK = false;
+    $('#dot').classList.remove('on');
+  };
+}
+
+function onNewSMS(m){
+  if(m && m.dir === 'in'){
+    toast('收到 ' + (m.peer || '未知号码') + ' 的短信');
+  }
+  loadStatus();
+  // 只有用户停在列表顶部时才自动刷新，避免打断正在翻页的人
+  if(offset === 0) loadMessages(true);
+}
+
 /* ---------------- 启动 ---------------- */
 loadStatus(); loadMessages(true);
+connectSSE();
+
+// 降级轮询：仅在 SSE 断开时兜底，间隔比原来的 6 秒长，避免与推送重复
 timer = setInterval(() => {
+  if(document.hidden || esOK) return;
   if(curTab === 'sms'){ loadStatus(); loadMessages(true); }
-  else if(curTab === 'sys'){ loadSystem(); }
-}, 6000);
+  else if(curTab === 'sys') loadSystem();
+}, 15000);
+
 document.addEventListener('visibilitychange', () => {
-  if(document.hidden){ clearInterval(timer); timer = null; }
-  else if(!timer){
-    if(curTab === 'sms') loadStatus();
-    timer = setInterval(() => {
-      if(curTab === 'sms'){ loadStatus(); loadMessages(true); }
-      else if(curTab === 'sys'){ loadSystem(); }
-    }, 6000);
-  }
+  if(document.hidden) return;
+  // 从后台切回来时补一次，SSE 可能已被系统挂起
+  if(curTab === 'sms'){ loadStatus(); loadMessages(true); }
+  else if(curTab === 'sys') loadSystem();
+  if(!esOK) connectSSE();
 });
 </script>
 </body>
