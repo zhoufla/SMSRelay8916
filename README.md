@@ -162,6 +162,19 @@ systemctl enable --now sms-gw
 部署到公网前请自行加固：设置 `api_token`、把 8088 只监听内网或套反向代理加 TLS、
 不要把 `/api/settings` 与 `/api/ddns` 直接暴露到公网（它们能读到脱敏后的 token 前缀与全部配置）。
 
+提交前跑一次自检（会同时扫工作区和全部 git 历史）：
+
+```bash
+make privacy
+```
+
+想让它自动拦截，把下面这行写进 `.git/hooks/pre-commit`：
+
+```bash
+#!/bin/sh
+exec ./scripts/privacy-check.sh
+```
+
 ## HTTP API
 
 与 Python 版完全一致。
