@@ -154,12 +154,15 @@ systemctl start smsrelay
 
 ## 运行期组件
 
-| 组件 | 路径 | 作用 |
-|---|---|---|
-| `smsrelay.service` | `/opt/smsrelay/smsrelay` | 主进程：收信 / 归档 / 转发 / HTTP |
-| `smsrelay-keepalive.service` | `/usr/local/bin/smsrelay-keepalive.sh` | 每 10 秒一个 ICMP，避免 LTE 停在空闲态导致收不到寻呼 |
-| `smsrelay-maint.timer` → `.service` | `/usr/local/bin/smsrelay-maint.sh` | 每天 04:10 停 MM 独占 AT 口，清掉孤儿短信分片（纯 shell，不依赖 python3） |
-| `sms` | `/usr/local/bin/sms` | 命令行工具，只依赖 `curl` + `jq` |
+除了主程序，还有三个辅助件。它们的源码都在仓库里，`./deploy.sh` 会一起安装——
+不需要手工往设备上拷文件，改完脚本重新部署即可生效。
+
+| 组件 | 仓库文件 | 设备路径 | 作用 |
+|---|---|---|---|
+| 主程序 | `cmd/`（编译产物） | `/opt/smsrelay/smsrelay` | 收信 / 归档 / 转发 / HTTP |
+| LTE 保活 | `scripts/smsrelay-keepalive.sh`<br>`deploy/smsrelay-keepalive.service` | `/usr/local/bin/smsrelay-keepalive.sh` | 每 10 秒一个 ICMP，避免 LTE 停在空闲态导致收不到寻呼 |
+| 每日清理 | `scripts/smsrelay-maint.sh`<br>`deploy/smsrelay-maint.service`<br>`deploy/smsrelay-maint.timer` | `/usr/local/bin/smsrelay-maint.sh` | 每天 04:10 停 MM 独占 AT 口，清掉孤儿短信分片（纯 shell，不依赖 python3） |
+| 命令行 | `scripts/sms` | `/usr/local/bin/sms` | 只依赖 `curl` + `jq` |
 
 ```bash
 sms status              # 号码 / 信号 / 收发统计 / 投递延迟
@@ -167,6 +170,9 @@ sms list 20             # 最近 20 条
 sms send 10086 cxye     # 发送（超长自动拆分）
 sms fwd-test            # 向所有启用通道发测试消息
 ```
+
+`deploy.sh` 装之前会先 `sh -n` 验语法——装一个跑不起来的清理脚本比不装更糟。
+设备上缺 `jq` 时只告警不中断，`sms` 命令届时不可用（`apt-get install jq` 即可）。
 
 数据与配置都在 root 下，注意备份：
 

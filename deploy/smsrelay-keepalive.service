@@ -1,0 +1,13 @@
+[Unit]
+Description=SMS relay LTE keepalive (prevent ECM-IDLE paging loss)
+After=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/smsrelay-keepalive.sh
+Restart=always
+RestartSec=10
+MemoryMax=8M
+
+[Install]
+WantedBy=multi-user.target

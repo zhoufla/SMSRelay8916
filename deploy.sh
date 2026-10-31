@@ -129,6 +129,46 @@ systemctl enable smsrelay >/dev/null 2>&1
 REMOTE
 
 # ---------------------------------------------------------------------------
+# 辅助脚本与定时器：每日清理、LTE 保活、命令行工具
+# 这些东西以前只存在于设备上，换台机器就没了，所以随部署一起安装。
+# ---------------------------------------------------------------------------
+log "安装辅助脚本与定时器..."
+for f in smsrelay-maint.sh smsrelay-keepalive.sh sms; do
+    rcp "scripts/$f" "$USER_NAME@$HOST:/tmp/$f"
+done
+for u in smsrelay-maint.service smsrelay-maint.timer smsrelay-keepalive.service; do
+    rcp "deploy/$u" "$USER_NAME@$HOST:/tmp/$u"
+done
+
+rsh bash -s <<REMOTE
+set -e
+install -m 0755 /tmp/smsrelay-maint.sh     /usr/local/bin/smsrelay-maint.sh
+install -m 0755 /tmp/smsrelay-keepalive.sh /usr/local/bin/smsrelay-keepalive.sh
+install -m 0755 /tmp/sms                          /usr/local/bin/sms
+install -m 0644 /tmp/smsrelay-maint.service     /etc/systemd/system/smsrelay-maint.service
+install -m 0644 /tmp/smsrelay-maint.timer       /etc/systemd/system/smsrelay-maint.timer
+install -m 0644 /tmp/smsrelay-keepalive.service /etc/systemd/system/smsrelay-keepalive.service
+rm -f /tmp/smsrelay-maint.sh /tmp/smsrelay-keepalive.sh /tmp/sms \
+      /tmp/smsrelay-maint.service /tmp/smsrelay-maint.timer /tmp/smsrelay-keepalive.service
+
+# 装上去之前先验语法：装一个跑不起来的清理脚本，比不装更糟
+sh -n /usr/local/bin/smsrelay-maint.sh
+sh -n /usr/local/bin/smsrelay-keepalive.sh
+sh -n /usr/local/bin/sms
+echo "  脚本语法: OK"
+
+systemctl daemon-reload
+systemctl enable smsrelay-maint.timer >/dev/null 2>&1 || true
+systemctl enable smsrelay-keepalive.service >/dev/null 2>&1 || true
+
+if command -v jq >/dev/null 2>&1; then
+    echo "  jq: 已安装，sms 命令可用"
+else
+    echo "  ⚠ 缺少 jq，sms 命令不可用：apt-get install jq"
+fi
+REMOTE
+
+# ---------------------------------------------------------------------------
 # 切换：停旧版，启新版
 # ---------------------------------------------------------------------------
 if [ "$KEEP_OLD" = "0" ]; then
@@ -136,14 +176,20 @@ if [ "$KEEP_OLD" = "0" ]; then
     rsh 'systemctl disable --now sms-gw 2>/dev/null || true; systemctl is-active sms-gw 2>/dev/null || echo "  sms-gw: 已停止"'
 fi
 
-log "启动 smsrelay..."
-rsh 'systemctl restart smsrelay; sleep 4; systemctl is-active smsrelay'
+log "启动 smsrelay 与辅助服务..."
+rsh 'systemctl restart smsrelay; systemctl restart smsrelay-keepalive; systemctl start smsrelay-maint.timer; sleep 4
+     systemctl is-active smsrelay smsrelay-keepalive smsrelay-maint.timer'
 
 echo
 log "状态自检"
 rsh bash -s <<'REMOTE'
 echo "--- 服务 ---"
 systemctl is-active smsrelay
+echo "--- 辅助 ---"
+for u in smsrelay-keepalive smsrelay-maint.timer; do
+    printf "  %-24s %s\n" "$u" "$(systemctl is-active $u 2>/dev/null)"
+done
+systemctl list-timers smsrelay-maint.timer --no-pager 2>/dev/null | awk 'NR==2{print "  下次清理: "$1" "$2" "$3}'
 echo "--- 内存 ---"
 P=$(systemctl show -p MainPID --value smsrelay)
 ps -o rss=,pcpu= -p "$P" 2>/dev/null | awk '{printf "  RSS=%.1fMB CPU=%s%%\n", $1/1024, $2}'

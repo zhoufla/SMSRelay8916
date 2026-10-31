@@ -1,0 +1,8 @@
+[Unit]
+Description=SMS relay daily storage cleanup (orphan SMS parts)
+After=ModemManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/smsrelay-maint.sh
+TimeoutStartSec=180
