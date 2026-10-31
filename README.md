@@ -2,7 +2,9 @@
 
 jz02v10（MSM8916 / 高通 410）随身 WiFi 的短信网关。收短信、归档、钉钉转发、Web 收发。
 
-Go 重写版，替换早期 Python 实现（`/opt/sms-gw/sms-gw.py`）。API 与页面完全兼容，共用同一个 SQLite 归档库，可随时回退。
+Go 重写版，替换早期 Python 实现（`/opt/sms-gw/sms-gw.py`）。API 与页面完全兼容，共用同一个 SQLite 归档库。
+
+> 早期 Python 版已从设备上移除，运行期只依赖这一个静态二进制；`/usr/local/bin/sms` 命令行工具改为 `curl + jq`，不再需要 python3。
 
 ---
 
@@ -111,25 +113,27 @@ cd ~/github/SMSRelay8916
 DEVICE_PASS=<设备密码> ./deploy.sh <设备地址>
 ```
 
-脚本会：校验架构 → 上传 → 装到 `/opt/smsrelay/` → 复用旧配置（`/etc/sms-gw/config.json`）→ 停旧 `sms-gw` → 启 `smsrelay` → 自检。
+脚本会：校验架构 → 上传 → 装到 `/opt/smsrelay/` → 沿用已有配置（优先 `/etc/smsrelay/config.json`，其次老版本的 `/etc/sms-gw/config.json`）→ 停掉遗留的 `sms-gw`（若存在）→ 启 `smsrelay` → 自检。
 
-回退：
+回退到上一个二进制：
 
 ```bash
-systemctl disable --now smsrelay
-systemctl enable --now sms-gw
+# 覆盖前先备份：cp /opt/smsrelay/smsrelay /opt/smsrelay/smsrelay.bak
+systemctl stop smsrelay
+cp /opt/smsrelay/smsrelay.bak /opt/smsrelay/smsrelay
+systemctl start smsrelay
 ```
 
 ## 配置
 
-默认读 `/etc/smsrelay/config.json`，不存在则回退 `/etc/sms-gw/config.json`（字段名完全一致，可直接复用）。
+默认读 `/etc/smsrelay/config.json`（可用 `SMSRELAY_CONFIG` 覆盖）；文件不存在时会尝试老版本留下的 `/etc/sms-gw/config.json`，两者字段名完全一致。
 
 ```json
 {
   "listen_host": "0.0.0.0",
   "listen_port": 8088,
   "api_token": "",
-  "db_path": "/var/lib/sms-gw/sms.db",
+  "db_path": "/var/lib/smsrelay/sms.db",
   "guard_interval": 60,
   "modem_index": "0",
   "web_dir": "/opt/smsrelay/web",
@@ -147,6 +151,29 @@ systemctl enable --now sms-gw
 - `web_dir` 存在时优先用外部 `index.html`，改页面不用重编译
 - `guard_interval` 是兜底轮询秒数，设 0 用默认 60
 - 上面所有值都是**占位值**：`own_number` 换成你自己的号码（留空则跟随 SIM 卡），`access_token` 换成真实 token
+
+## 运行期组件
+
+| 组件 | 路径 | 作用 |
+|---|---|---|
+| `smsrelay.service` | `/opt/smsrelay/smsrelay` | 主进程：收信 / 归档 / 转发 / HTTP |
+| `smsrelay-keepalive.service` | `/usr/local/bin/smsrelay-keepalive.sh` | 每 10 秒一个 ICMP，避免 LTE 停在空闲态导致收不到寻呼 |
+| `smsrelay-maint.timer` → `.service` | `/usr/local/bin/smsrelay-maint.sh` | 每天 04:10 停 MM 独占 AT 口，清掉孤儿短信分片（纯 shell，不依赖 python3） |
+| `sms` | `/usr/local/bin/sms` | 命令行工具，只依赖 `curl` + `jq` |
+
+```bash
+sms status              # 号码 / 信号 / 收发统计 / 投递延迟
+sms list 20             # 最近 20 条
+sms send 10086 cxye     # 发送（超长自动拆分）
+sms fwd-test            # 向所有启用通道发测试消息
+```
+
+数据与配置都在 root 下，注意备份：
+
+```
+/var/lib/smsrelay/sms.db     归档库（含短信、通道、DDNS、设置）
+/etc/smsrelay/config.json    配置（含 token，权限 600）
+```
 
 ## 转发通道与模板
 
@@ -280,7 +307,7 @@ ModemManager 自己就是用 `wwan0at1` 下发 `AT+CMGR` 把 `+CMTI` 通知变�
 
 这台 MSM8916 + 2015 年 MPSS 固件在 LTE 空闲态（ECM-IDLE）下收不到网络寻呼。别人随机时间发来的短信可能延迟几分钟，直到设备因其它原因重新附着才补投。
 
-`AT+CREG: 0,1` 显示 CS 域已注册，但空闲寻呼实际打不到，属固件/网络侧行为，软件改不动根因，只能缓解：`sms-gw-keepalive.service` 每 10 秒 ping 一次，维持连接活跃（约 0.5 MB/天）。
+`AT+CREG: 0,1` 显示 CS 域已注册，但空闲寻呼实际打不到，属固件/网络侧行为，软件改不动根因，只能缓解：`smsrelay-keepalive.service` 每 10 秒 ping 一次，维持连接活跃（约 0.5 MB/天）。
 
 `/api/status` 的 `paging_24h` 字段用于观察缓解效果：`slow_count`（延迟 > 60s 的条数）应为 0。
 

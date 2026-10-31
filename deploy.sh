@@ -169,7 +169,8 @@ echo
 log "完成。Web UI: http://$HOST:8088"
 cat <<'EOF'
 
-回退到 Python 版：
-  systemctl disable --now smsrelay
-  systemctl enable --now sms-gw
+回退到上一个二进制：
+  systemctl stop smsrelay
+  cp /opt/smsrelay/smsrelay.bak /opt/smsrelay/smsrelay
+  systemctl start smsrelay
 EOF
