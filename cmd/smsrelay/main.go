@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/zhoufla/SMSRelay8916/internal/api"
+	"github.com/zhoufla/SMSRelay8916/internal/ddns"
 	"github.com/zhoufla/SMSRelay8916/internal/eventbus"
 	"github.com/zhoufla/SMSRelay8916/internal/forward"
 	"github.com/zhoufla/SMSRelay8916/internal/modem"
@@ -176,6 +177,7 @@ type App struct {
 	store    *store.Store
 	modem    *modem.Client
 	sender   *forward.Sender
+	cf       *ddns.Client
 	sys      *sysinfo.Collector
 	bus      *eventbus.Bus
 	startTS  time.Time
@@ -242,6 +244,7 @@ func main() {
 		states:   make(map[string]*smsState),
 	}
 	app.sender = forward.NewSender()
+	app.cf = ddns.NewClient()
 	app.migrateLegacyDingTalk()
 	if chs, err := app.store.ListChannels(true); err == nil {
 		if len(chs) > 0 {
@@ -284,6 +287,9 @@ func main() {
 
 	// 4) 转发队列
 	go app.forwardLoop(ctx)
+
+	// 5) DDNS：启动 15 秒后先跑一次，之后每 5 分钟一次
+	go app.ddnsLoop(ctx, 5*time.Minute)
 
 	// 5) HTTP
 	srv := &http.Server{
@@ -1132,4 +1138,183 @@ func mergeMaskedConfig(dst *forward.Config, old forward.Config) {
 			}
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// DDNS
+// ---------------------------------------------------------------------------
+
+// ddnsLoop 周期性把所有启用的 DDNS 记录同步到 Cloudflare。
+func (a *App) ddnsLoop(ctx context.Context, iv time.Duration) {
+	// 启动后先等一会儿，避开开机时网络还没就绪的阶段
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(15 * time.Second):
+	}
+	a.ddnsSyncAll()
+
+	t := time.NewTicker(iv)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			a.ddnsSyncAll()
+		}
+	}
+}
+
+func (a *App) ddnsSyncAll() {
+	recs, err := a.store.ListDDNS()
+	if err != nil {
+		log.Printf("WARN 读取 DDNS 记录失败: %v", err)
+		return
+	}
+	for i := range recs {
+		if !recs[i].Enabled {
+			continue
+		}
+		a.syncDDNSRecord(&recs[i])
+	}
+}
+
+func (a *App) syncDDNSRecord(r *ddns.Record) {
+	changed, ip, err := a.cf.Sync(r, "")
+	if err != nil {
+		_ = a.store.UpdateDDNSResult(r.ID, "", err.Error())
+		log.Printf("ddns %s (%s) 失败: %v", r.Name, r.Type, err)
+		return
+	}
+	if changed {
+		_ = a.store.UpdateDDNSResult(r.ID, ip, "")
+		log.Printf("ddns %s (%s) -> %s", r.Name, r.Type, ip)
+	} else if ip != r.LastIP {
+		// Cloudflare 上已经是这个地址（例如手动改过），同步一下本地记录
+		_ = a.store.UpdateDDNSResult(r.ID, ip, "")
+	}
+}
+
+// ListDDNS 返回所有记录，附带实时地址与可达性判断。
+func (a *App) ListDDNS() ([]ddns.Record, error) {
+	recs, err := a.store.ListDDNS()
+	if err != nil {
+		return nil, err
+	}
+	for i := range recs {
+		// API token 脱敏
+		if t := recs[i].APIToken; t != "" {
+			if len(t) <= 4 {
+				recs[i].APIToken = "****"
+			} else {
+				recs[i].APIToken = "****" + t[len(t)-4:]
+			}
+		}
+
+		// iface 来源读本地网卡，几乎零成本，直接实时算。
+		// external 要走一次公网请求（还可能超时重试），绝不能放在列表接口里 ——
+		// 之前这么干导致 /api/ddns 被拖到 30 秒以上，前端直接超时。
+		if strings.HasPrefix(recs[i].Source, "iface:") {
+			ip, rerr := ddns.ResolveIP(recs[i].Source, recs[i].Type, "")
+			if rerr != nil {
+				recs[i].Reachability = "unknown"
+				recs[i].ReachNote = rerr.Error()
+				continue
+			}
+			recs[i].CurrentIP = ip
+			recs[i].Reachability, recs[i].ReachNote = ddns.Judge(recs[i], ip)
+			continue
+		}
+
+		// external：只展示上次同步拿到的地址
+		recs[i].CurrentIP = recs[i].LastIP
+		if recs[i].LastIP != "" {
+			recs[i].Reachability, recs[i].ReachNote = ddns.Judge(recs[i], recs[i].LastIP)
+		} else {
+			recs[i].Reachability = "unknown"
+			recs[i].ReachNote = "尚未同步，点「立即同步」获取出口 IP"
+		}
+	}
+	return recs, nil
+}
+
+// CreateDDNS 新建记录。
+func (a *App) CreateDDNS(r *ddns.Record) error {
+	if err := validateDDNS(r); err != nil {
+		return err
+	}
+	return a.store.CreateDDNS(r)
+}
+
+// UpdateDDNS 更新记录。token 回传脱敏值时保留库里的原值。
+func (a *App) UpdateDDNS(r *ddns.Record) error {
+	old, err := a.store.GetDDNS(r.ID)
+	if err != nil {
+		return err
+	}
+	if old == nil {
+		return fmt.Errorf("记录不存在")
+	}
+	if strings.HasPrefix(r.APIToken, "****") {
+		r.APIToken = old.APIToken
+	}
+	if err := validateDDNS(r); err != nil {
+		return err
+	}
+	return a.store.UpdateDDNS(r)
+}
+
+// DeleteDDNS 删除记录（只删本地配置，不动 Cloudflare 上的解析）。
+func (a *App) DeleteDDNS(id int64) error {
+	return a.store.DeleteDDNS(id)
+}
+
+// SyncDDNSNow 手动触发一次同步，便于配完立刻验证。
+func (a *App) SyncDDNSNow(id int64) (string, error) {
+	r, err := a.store.GetDDNS(id)
+	if err != nil {
+		return "", err
+	}
+	if r == nil {
+		return "", fmt.Errorf("记录不存在")
+	}
+	changed, ip, serr := a.cf.Sync(r, "")
+	if serr != nil {
+		_ = a.store.UpdateDDNSResult(r.ID, "", serr.Error())
+		return "", serr
+	}
+	_ = a.store.UpdateDDNSResult(r.ID, ip, "")
+	if changed {
+		return fmt.Sprintf("已更新为 %s", ip), nil
+	}
+	return fmt.Sprintf("无需更新（%s）", ip), nil
+}
+
+func validateDDNS(r *ddns.Record) error {
+	r.Name = strings.TrimSpace(r.Name)
+	r.Source = strings.TrimSpace(r.Source)
+
+	if r.Name == "" || !strings.Contains(r.Name, ".") {
+		return fmt.Errorf("记录名必须是完整域名，如 sub.example.com")
+	}
+	if r.Type != "A" && r.Type != "AAAA" {
+		return fmt.Errorf("类型必须是 A 或 AAAA")
+	}
+	if strings.TrimSpace(r.APIToken) == "" {
+		return fmt.Errorf("Cloudflare API Token 必填")
+	}
+	if r.Source == "" {
+		return fmt.Errorf("地址来源必填（iface:wlan0 或 external）")
+	}
+	if !strings.HasPrefix(r.Source, "iface:") && r.Source != "external" {
+		return fmt.Errorf("来源必须是 iface:网卡名 或 external")
+	}
+	if r.Type == "AAAA" && r.Source == "external" {
+		return fmt.Errorf("IPv6 不支持 external 来源，请改用 iface:xxx")
+	}
+	if r.TTL == 0 {
+		r.TTL = 1
+	}
+	return nil
 }

@@ -154,6 +154,7 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
     <button data-tab="sms" class="act">短信</button>
     <button data-tab="sys">系统</button>
     <button data-tab="set">设置</button>
+    <button data-tab="ddns">DDNS</button>
   </div>
 
   <!-- ============ 短信 ============ -->
@@ -289,6 +290,46 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
     <div class="field">
       <div class="hint" id="set-api">接口口令：--</div>
       <div class="hint" id="set-ver">服务版本：--</div>
+    </div>
+  </div>
+
+  <!-- ============ DDNS ============ -->
+  <div class="panel" id="pane-ddns">
+    <div class="notice">
+      本机 IPv4 是运营商 CGNAT，<b>A 记录解析出来的地址外部连不进来</b>；
+      AAAA 只有 <code>iface:wlan0</code> 的地址真正可用（且需路由器放行入站）。
+      4G 的 IPv6 只下发地址、数据面不通，用它做 AAAA 没有意义。
+    </div>
+
+    <div id="ddns-list"></div>
+
+    <div class="field" id="ddns-form" style="display:none">
+      <label>域名（完整记录名）</label>
+      <input id="d-name" placeholder="sub.example.com">
+      <label style="margin-top:10px">记录类型</label>
+      <select id="d-type">
+        <option value="AAAA">AAAA — IPv6</option>
+        <option value="A">A — IPv4</option>
+      </select>
+      <label style="margin-top:10px">地址来源</label>
+      <select id="d-source">
+        <option value="iface:wlan0">iface:wlan0 — WiFi 网卡（推荐）</option>
+        <option value="iface:wwan0">iface:wwan0 — 4G 网卡（IPv6 不可用）</option>
+        <option value="external">external — 查询出口 IP（仅 IPv4）</option>
+      </select>
+      <label style="margin-top:10px">Cloudflare API Token</label>
+      <input id="d-token" placeholder="需要该 Zone 的 DNS 编辑权限">
+      <label style="margin-top:10px">Zone ID（可选）</label>
+      <input id="d-zone" placeholder="留空则按域名自动查找；.com.cn 这类建议手填">
+      <div class="act">
+        <button class="btn" id="d-save">保存</button>
+        <button class="btn ghost" id="d-cancel">取消</button>
+      </div>
+    </div>
+
+    <button class="btn" id="d-add" style="width:100%">+ 新增记录</button>
+    <div class="hint" style="margin-top:8px">
+      同一域名可以建两条（一条 A、一条 AAAA），也可以只建一条。每 5 分钟检查一次，地址没变不会调用 API。
     </div>
   </div>
 </div>
@@ -594,6 +635,91 @@ async function saveChannel(){
   }catch(e){ toast('保存失败：' + e.message); }
 }
 
+
+/* ---------------- DDNS ---------------- */
+let ddnsRecs = [], editingDDNS = null;
+
+async function loadDDNS(){
+  try{
+    const r = await api('/api/ddns');
+    ddnsRecs = r.items || [];
+    renderDDNS();
+  }catch(e){ }
+}
+
+function reachBadge(r){
+  const m = {
+    ok:     ['ok',   '可达'],
+    cgnat:  ['err',  '无公网入口'],
+    nat:    ['warn', '出口 IP'],
+    'no-v6':['err',  '4G IPv6 未开通'],
+    unknown:['warn', '未知']
+  };
+  const v = m[r.reachability] || m.unknown;
+  return `<span class="badge ${v[0]}" title="${esc(r.reach_note || '')}">${v[1]}</span>`;
+}
+
+function renderDDNS(){
+  if(!ddnsRecs.length){
+    $('#ddns-list').innerHTML = '<div class="field" style="color:var(--fg3);font-size:12.5px">还没有 DDNS 记录。</div>';
+    return;
+  }
+  $('#ddns-list').innerHTML = ddnsRecs.map(r => `
+    <div class="field">
+      <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:8px">
+        <strong style="font-size:13.5px">${esc(r.name)}</strong>
+        <span class="badge warn">${esc(r.type)}</span>
+        ${reachBadge(r)}
+        <span class="badge ${r.enabled ? 'ok' : 'err'}">${r.enabled ? '启用' : '停用'}</span>
+      </div>
+      <div class="rows" style="margin:0">
+        <div class="rw"><span class="k">当前地址</span><span class="v">${esc(r.current_ip || '--')}</span></div>
+        <div class="rw"><span class="k">DNS 上的值</span><span class="v">${esc(r.last_ip || '--')}</span></div>
+        <div class="rw"><span class="k">上次同步</span><span class="v">${esc(r.last_update || '--')}</span></div>
+        ${r.last_error ? `<div class="rw"><span class="k">错误</span><span class="v" style="color:var(--err);white-space:normal">${esc(r.last_error)}</span></div>` : ''}
+      </div>
+      <div class="act">
+        <button class="btn ghost" data-d="edit" data-id="${r.id}">编辑</button>
+        <button class="btn ghost" data-d="sync" data-id="${r.id}">立即同步</button>
+        <button class="btn ghost" data-d="del" data-id="${r.id}" style="color:var(--err)">删除</button>
+      </div>
+    </div>`).join('');
+}
+
+function openDDNSForm(r){
+  editingDDNS = r || null;
+  $('#ddns-form').style.display = 'block';
+  $('#d-name').value = r ? r.name : '';
+  $('#d-type').value = r ? r.type : 'AAAA';
+  $('#d-source').value = r ? r.source : 'iface:wlan0';
+  $('#d-token').value = r ? (r.api_token || '') : '';
+  $('#d-zone').value = r ? (r.zone_id || '') : '';
+  $('#ddns-form').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+async function saveDDNS(){
+  const body = {
+    name: $('#d-name').value.trim(),
+    type: $('#d-type').value,
+    source: $('#d-source').value,
+    api_token: $('#d-token').value.trim(),
+    zone_id: $('#d-zone').value.trim(),
+    enabled: editingDDNS ? editingDDNS.enabled : true,
+    ttl: 1
+  };
+  try{
+    if(editingDDNS){
+      await api('/api/ddns/' + editingDDNS.id, {method:'PUT', body: JSON.stringify(body)});
+    } else {
+      await api('/api/ddns', {method:'POST', body: JSON.stringify(body)});
+    }
+    toast('已保存，正在同步…');
+    $('#ddns-form').style.display = 'none';
+    editingDDNS = null;
+    loadDDNS();
+  }catch(e){ toast('保存失败：' + e.message); }
+}
+
 /* ---------------- Tab ---------------- */
 $('#tabs').addEventListener('click', e => {
   const b = e.target.closest('button'); if(!b) return;
@@ -606,6 +732,7 @@ $('#tabs').addEventListener('click', e => {
   if(curTab !== 'sms') closeCompose();
   if(curTab === 'sys') loadSystem();
   if(curTab === 'set') loadSettings();
+  if(curTab === 'ddns') loadDDNS();
 });
 
 /* ---------------- 交互 ---------------- */
@@ -631,6 +758,33 @@ $('#fab').addEventListener('click', () => openCompose());
 $('#close').addEventListener('click', closeCompose);
 $('#own-save').addEventListener('click', () => saveOwnNumber($('#own-num').value.trim()));
 $('#own-clear').addEventListener('click', () => { $('#own-num').value = ''; saveOwnNumber(''); });
+
+$('#d-add').addEventListener('click', () => openDDNSForm(null));
+$('#d-save').addEventListener('click', saveDDNS);
+$('#d-cancel').addEventListener('click', () => { $('#ddns-form').style.display = 'none'; editingDDNS = null; });
+$('#ddns-list').addEventListener('click', async e => {
+  const b = e.target.closest('button[data-d]');
+  if(!b) return;
+  const id = +b.dataset.id;
+  if(b.dataset.d === 'edit'){
+    const r = ddnsRecs.find(x => x.id === id);
+    if(r) openDDNSForm(r);
+    return;
+  }
+  if(b.dataset.d === 'sync'){
+    b.disabled = true; b.textContent = '同步中…';
+    try{ const r = await api('/api/ddns/' + id + '/sync', {method:'POST'}); toast(r.message || '已同步'); }
+    catch(err){ toast('同步失败：' + err.message); }
+    b.disabled = false; b.textContent = '立即同步';
+    loadDDNS();
+    return;
+  }
+  if(b.dataset.d === 'del'){
+    if(!confirm('删除这条 DDNS 记录？不会动 Cloudflare 上已有的解析。')) return;
+    try{ await api('/api/ddns/' + id, {method:'DELETE'}); loadDDNS(); }
+    catch(err){ toast('删除失败：' + err.message); }
+  }
+});
 
 $('#ch-add').addEventListener('click', () => openChannelForm(null));
 $('#ch-type').addEventListener('change', toggleChannelType);

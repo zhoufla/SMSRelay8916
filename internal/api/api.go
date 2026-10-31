@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zhoufla/SMSRelay8916/internal/ddns"
 	"github.com/zhoufla/SMSRelay8916/internal/eventbus"
 	"github.com/zhoufla/SMSRelay8916/internal/forward"
 	"github.com/zhoufla/SMSRelay8916/internal/store"
@@ -88,6 +89,11 @@ type Backend interface {
 	UpdateChannel(*forward.Channel) error
 	DeleteChannel(int64) error
 	TestChannel(int64) error
+	ListDDNS() ([]ddns.Record, error)
+	CreateDDNS(*ddns.Record) error
+	UpdateDDNS(*ddns.Record) error
+	DeleteDDNS(int64) error
+	SyncDDNSNow(int64) (string, error)
 	Token() string
 }
 
@@ -114,6 +120,8 @@ var idPattern = regexp.MustCompile(`^/api/messages/(\d+)$`)
 var (
 	channelIDRe   = regexp.MustCompile(`^/api/channels/(\d+)$`)
 	channelTestRe = regexp.MustCompile(`^/api/channels/(\d+)/test$`)
+	ddnsIDRe      = regexp.MustCompile(`^/api/ddns/(\d+)$`)
+	ddnsSyncRe    = regexp.MustCompile(`^/api/ddns/(\d+)/sync$`)
 )
 
 func pathID(re *regexp.Regexp, path string) int64 {
@@ -193,6 +201,15 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		s.testChannel(w, r, pathID(channelTestRe, path))
 	case channelIDRe.MatchString(path):
 		s.channelByID(w, r, pathID(channelIDRe, path))
+
+	case path == "/api/ddns" && r.Method == http.MethodGet:
+		s.listDDNS(w)
+	case path == "/api/ddns" && r.Method == http.MethodPost:
+		s.createDDNS(w, r)
+	case ddnsSyncRe.MatchString(path) && r.Method == http.MethodPost:
+		s.syncDDNS(w, pathID(ddnsSyncRe, path))
+	case ddnsIDRe.MatchString(path):
+		s.ddnsByID(w, r, pathID(ddnsIDRe, path))
 
 	case r.Method == http.MethodGet && path == "/api/events":
 		s.events(w, r)
@@ -410,6 +427,65 @@ func (s *Server) testChannel(w http.ResponseWriter, r *http.Request, id int64) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) listDDNS(w http.ResponseWriter) {
+	recs, err := s.backend.ListDDNS()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if recs == nil {
+		recs = []ddns.Record{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"items": recs})
+}
+
+func (s *Server) createDDNS(w http.ResponseWriter, r *http.Request) {
+	var rec ddns.Record
+	if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
+		return
+	}
+	if err := s.backend.CreateDDNS(&rec); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "id": rec.ID})
+}
+
+func (s *Server) ddnsByID(w http.ResponseWriter, r *http.Request, id int64) {
+	switch r.Method {
+	case http.MethodPut:
+		var rec ddns.Record
+		if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
+			return
+		}
+		rec.ID = id
+		if err := s.backend.UpdateDDNS(&rec); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	case http.MethodDelete:
+		if err := s.backend.DeleteDDNS(id); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	}
+}
+
+func (s *Server) syncDDNS(w http.ResponseWriter, id int64) {
+	msg, err := s.backend.SyncDDNSNow(id)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]interface{}{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "message": msg})
 }
 
 func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {

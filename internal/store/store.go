@@ -16,6 +16,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/zhoufla/SMSRelay8916/internal/ddns"
 	"github.com/zhoufla/SMSRelay8916/internal/forward"
 )
 
@@ -728,5 +729,103 @@ func (s *Store) ResetDeliveries(messageID int64) error {
 	}
 	_, err = s.db.Exec(
 		"UPDATE messages SET forwarded=0, attempts=0, forward_error=NULL WHERE id=?", messageID)
+	return err
+}
+
+// ---------------------------------------------------------------------------
+// DDNS 记录
+// ---------------------------------------------------------------------------
+
+// 用 IFNULL 把可空列统一成空字符串，避免 Scan 到 NULL 报错。
+const ddnsCols = `id, name, type, IFNULL(zone_id,''), api_token, source,
+       proxied, ttl, enabled, IFNULL(last_ip,''), IFNULL(last_update,''), IFNULL(last_error,'')`
+
+func scanDDNS(r rowScanner) (*ddns.Record, error) {
+	var (
+		rec     ddns.Record
+		proxied int
+		enabled int
+	)
+	err := r.Scan(&rec.ID, &rec.Name, &rec.Type, &rec.ZoneID, &rec.APIToken,
+		&rec.Source, &proxied, &rec.TTL, &enabled,
+		&rec.LastIP, &rec.LastUpdate, &rec.LastError)
+	if err != nil {
+		return nil, err
+	}
+	rec.Proxied = proxied != 0
+	rec.Enabled = enabled != 0
+	return &rec, nil
+}
+
+// ListDDNS 列出全部 DDNS 记录。
+func (s *Store) ListDDNS() ([]ddns.Record, error) {
+	rows, err := s.db.Query("SELECT " + ddnsCols + " FROM ddns ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ddns.Record
+	for rows.Next() {
+		r, err := scanDDNS(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *r)
+	}
+	return out, rows.Err()
+}
+
+// GetDDNS 按 id 取记录。
+func (s *Store) GetDDNS(id int64) (*ddns.Record, error) {
+	row := s.db.QueryRow("SELECT "+ddnsCols+" FROM ddns WHERE id=?", id)
+	r, err := scanDDNS(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return r, err
+}
+
+// CreateDDNS 新建记录。
+func (s *Store) CreateDDNS(r *ddns.Record) error {
+	res, err := s.db.Exec(
+		`INSERT INTO ddns (name, type, zone_id, api_token, source, proxied, ttl, enabled)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		r.Name, r.Type, r.ZoneID, r.APIToken, r.Source,
+		boolToInt(r.Proxied), r.TTL, boolToInt(r.Enabled))
+	if err != nil {
+		return err
+	}
+	r.ID, _ = res.LastInsertId()
+	return nil
+}
+
+// UpdateDDNS 更新记录配置。
+func (s *Store) UpdateDDNS(r *ddns.Record) error {
+	_, err := s.db.Exec(
+		`UPDATE ddns SET name=?, type=?, zone_id=?, api_token=?, source=?,
+		   proxied=?, ttl=?, enabled=? WHERE id=?`,
+		r.Name, r.Type, r.ZoneID, r.APIToken, r.Source,
+		boolToInt(r.Proxied), r.TTL, boolToInt(r.Enabled), r.ID)
+	return err
+}
+
+// DeleteDDNS 删除记录。
+func (s *Store) DeleteDDNS(id int64) error {
+	_, err := s.db.Exec("DELETE FROM ddns WHERE id=?", id)
+	return err
+}
+
+// UpdateDDNSResult 记录一次同步结果。
+func (s *Store) UpdateDDNSResult(id int64, ip, errMsg string) error {
+	if errMsg != "" {
+		_, err := s.db.Exec(
+			"UPDATE ddns SET last_error=?, last_update=datetime('now','localtime') WHERE id=?",
+			errMsg, id)
+		return err
+	}
+	_, err := s.db.Exec(
+		"UPDATE ddns SET last_ip=?, last_error=NULL, last_update=datetime('now','localtime') WHERE id=?",
+		ip, id)
 	return err
 }
