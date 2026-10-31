@@ -148,6 +148,32 @@ systemctl enable --now sms-gw
 - `guard_interval` 是兜底轮询秒数，设 0 用默认 60
 - 上面所有值都是**占位值**：`own_number` 换成你自己的号码（留空则跟随 SIM 卡），`access_token` 换成真实 token
 
+## 转发通道与模板
+
+通道在界面上配置（`/api/channels`），支持 `dingtalk` 与 `webhook` 两种类型，可同时启用多条。
+每条通道的投递结果独立记账，一条失败不会让其它通道重推。
+
+模板占位符（纯文本用不带后缀的，JSON 里用 `_json` 后缀）：
+
+| 占位符 | 含义 | `_json` 版本 |
+|---|---|---|
+| `{{own_number}}` | 本机号码（收信号码） | `{{own_number_json}}` |
+| `{{number}}` | 对方号码 | `{{number_json}}` |
+| `{{body}}` | 短信正文 | `{{body_json}}` |
+| `{{ts}}` | 时间 | `{{ts_json}}` |
+| `{{dir}}` | `in` / `out` | `{{dir_json}}` |
+| `{{id}}` | 归档记录 id | — |
+| `{{prefix}}` | 通道配置的前缀 | `{{prefix_json}}` |
+
+**`_json` 版本自带引号**，所以 JSON 模板里直接写 `"text": {{body_json}}`，
+不要再套一层引号（写成 `"text": "{{body_json}}"` 会得到双引号嵌套的非法 JSON）。
+
+webhook 的正文模板留空时，使用下面这个合法 JSON 默认模板：
+
+```json
+{"own_number":{{own_number_json}},"from":{{number_json}},"text":{{body_json}},"ts":{{ts_json}},"id":{{id}},"dir":{{dir_json}}}
+```
+
 ## 安全与隐私
 
 这个仓库里**不含任何真实凭证或个人数据**，并且刻意做了以下约束：
