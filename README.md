@@ -164,7 +164,7 @@ systemctl start smsrelay
 | 组件 | 仓库文件 | 设备路径 | 作用 |
 |---|---|---|---|
 | 主程序 | `cmd/`（编译产物） | `/opt/smsrelay/smsrelay` | 收信 / 归档 / 转发 / HTTP |
-| LTE 保活 | `scripts/smsrelay-keepalive.sh`<br>`deploy/smsrelay-keepalive.service` | `/usr/local/bin/smsrelay-keepalive.sh` | 每 10 秒一个 ICMP，避免 LTE 停在空闲态导致收不到寻呼 |
+| LTE 保活+自愈 | `scripts/smsrelay-keepalive.sh`<br>`deploy/smsrelay-keepalive.service` | `/usr/local/bin/smsrelay-keepalive.sh` | 每 10 秒一个 ICMP 避免空闲态丢寻呼；连续 3 次不通自动 `nmcli con up modem` 重拨（5 分钟冷却），全程不碰 AT 口 |
 | 每日清理 | `scripts/smsrelay-maint.sh`<br>`deploy/smsrelay-maint.service`<br>`deploy/smsrelay-maint.timer` | `/usr/local/bin/smsrelay-maint.sh` | 每天 04:10 停 MM 独占 AT 口，清掉孤儿短信分片（纯 shell，不依赖 python3） |
 | 命令行 | `scripts/sms` | `/usr/local/bin/sms` | 只依赖 `curl` + `jq` |
 

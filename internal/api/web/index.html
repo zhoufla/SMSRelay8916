@@ -648,8 +648,9 @@ function renderSystem(s){
     const nets = s.net || {};
     const netRows = Object.keys(nets).map(k => {
       const n = nets[k];
-      if(!n.available) return `<div class="rw"><span class="k">${esc(k)}</span><span class="v" style="color:var(--fg3)">${esc(n.note || '不可用')}</span></div>`;
-      return `<div class="rw"><span class="k">${esc(k)}</span><span class="v">↓${fmtBps(n.rx_bps)} ↑${fmtBps(n.tx_bps)}</span></div>`;
+      const label = n.ip ? `${esc(k)} · ${esc(n.ip)}` : esc(k);
+      if(!n.available) return `<div class="rw"><span class="k">${label}</span><span class="v" style="color:var(--fg3)">${esc(n.note || '不可用')}</span></div>`;
+      return `<div class="rw"><span class="k">${label}</span><span class="v">↓${fmtBps(n.rx_bps)} ↑${fmtBps(n.tx_bps)}</span></div>`;
     });
     if(netRows.length) $('#m-net').innerHTML = netRows.join('');
 

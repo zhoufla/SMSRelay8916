@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -1141,7 +1140,7 @@ func (a *App) WifiStatus() (wifi.Status, error) {
 	if err != nil {
 		return st, err
 	}
-	st.IP = lanIP("wlan0")
+	st.IP = sysinfo.IfaceIPv4("wlan0")
 	return st, nil
 }
 
@@ -1162,21 +1161,6 @@ func (a *App) WifiForget(name string) error {
 	}
 	log.Printf("Wi-Fi 配置已删除: %s", name)
 	return nil
-}
-
-// lanIP 取 iface 上第一个全局 IPv4；没有返回空串。
-func lanIP(iface string) string {
-	ni, err := net.InterfaceByName(iface)
-	if err != nil {
-		return ""
-	}
-	addrs, _ := ni.Addrs()
-	for _, a := range addrs {
-		if ipn, ok := a.(*net.IPNet); ok && ipn.IP.To4() != nil && !ipn.IP.IsLoopback() {
-			return ipn.IP.String()
-		}
-	}
-	return ""
 }
 
 // retentionLoop 周期清理超过保留天数的归档记录。

@@ -8,6 +8,7 @@ package sysinfo
 import (
 	"context"
 	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -69,8 +70,27 @@ type NetIface struct {
 	TxBps     int64  `json:"tx_bps"`
 	RxTotalMB int64  `json:"rx_total_mb,omitempty"`
 	TxTotalMB int64  `json:"tx_total_mb,omitempty"`
+	IP        string `json:"ip,omitempty"` // 第一个全局 IPv4，无则空
 	Available bool   `json:"available"`
 	Note      string `json:"note,omitempty"`
+}
+
+// IfaceIPv4 取接口上第一个全局 IPv4（排除回环与链路本地 169.254）。
+// 供本包采样与 Wi-Fi 状态共用，无则返回空串。
+func IfaceIPv4(name string) string {
+	ni, err := net.InterfaceByName(name)
+	if err != nil {
+		return ""
+	}
+	addrs, _ := ni.Addrs()
+	for _, a := range addrs {
+		if ipn, ok := a.(*net.IPNet); ok {
+			if ip4 := ipn.IP.To4(); ip4 != nil && !ip4.IsLoopback() && !ip4.IsLinkLocalUnicast() {
+				return ip4.String()
+			}
+		}
+	}
+	return ""
 }
 
 // Procs 是进程数。
@@ -398,6 +418,7 @@ func (c *Collector) readNet(now time.Time) map[string]NetIface {
 			Available: true,
 			RxTotalMB: int64(rx / (1 << 20)),
 			TxTotalMB: int64(tx / (1 << 20)),
+			IP:        IfaceIPv4(name),
 		}
 
 		// 某些驱动（本机的 wwan0）不实现字节计数，恒为 0。
