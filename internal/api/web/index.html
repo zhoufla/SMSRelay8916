@@ -249,8 +249,8 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
   <!-- ============ 设置 ============ -->
   <div class="panel" id="pane-set">
     <div id="token-warn" class="notice" style="display:none">
-      未设置访问口令。任何能访问 8088 端口的设备都能读取或修改这里的配置，建议在
-      <code>config.json</code> 里设置 <code>api_token</code>。
+      未设置访问口令。任何能访问本机端口的人都能读取短信或修改这里的配置，
+      建议在下方「接口口令」里设置一个。
     </div>
 
     <div class="sec-title">本机号码</div>
@@ -326,7 +326,18 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
 
     <div class="sec-title">访问</div>
     <div class="field">
-      <div class="hint" id="set-api">接口口令：--</div>
+      <label>接口口令<span class="badge" id="token-state">--</span></label>
+      <input id="api-token" type="text" autocomplete="off" placeholder="留空保存 = 关闭鉴权">
+      <div class="hint">
+        设置后所有接口（含本页）都需要口令，本页会自动记住；CLI <code>sms</code> 自动读取，无需手动配置。
+        最少 6 位，可用「随机」生成。更换或清除前请想清楚——清除后接口对局域网完全开放。
+      </div>
+      <div class="act">
+        <button class="btn" id="token-save">保存</button>
+        <button class="btn ghost" id="token-gen">随机生成</button>
+      </div>
+    </div>
+    <div class="field">
       <div class="hint" id="set-ver">服务版本：--</div>
     </div>
   </div>
@@ -617,7 +628,9 @@ async function loadSettings(){
     b.textContent = src;
     b.className = 'badge ' + (s.own_number_source === 'none' ? 'err' : (s.own_number_source === 'manual' ? 'ok' : 'warn'));
     $('#token-warn').style.display = s.api_token_set ? 'none' : 'block';
-    $('#set-api').textContent = '接口口令：' + (s.api_token_set ? '已设置' : '未设置（任何人可访问）');
+    const tb = $('#token-state');
+    tb.textContent = s.api_token_set ? '已设置' : '未设置';
+    tb.className = 'badge ' + (s.api_token_set ? 'ok' : 'err');
     $('#retain').value = (s.values && s.values.retain_days) || '';
   }catch(e){ }
   loadChannels();
@@ -891,6 +904,28 @@ $('#retain-clean').addEventListener('click', async () => {
     toast(r.deleted > 0 ? `已清理 ${r.deleted} 条过期记录` : '没有过期记录');
   }catch(e){ toast('清理失败：' + e.message); }
   b.disabled = false; b.textContent = '立即清理';
+});
+
+/* 接口口令：界面直接设置/更换/清除，保存后写入 config.json 并立即生效 */
+$('#token-gen').addEventListener('click', () => {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  $('#api-token').value = [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+});
+$('#token-save').addEventListener('click', async () => {
+  const v = $('#api-token').value.trim();
+  if(v && v.length < 6){ toast('口令至少 6 位'); return; }
+  if(!v && !confirm('确定清除口令？接口将对局域网完全开放。')) return;
+  if(v && TOKEN && v === TOKEN){ toast('与当前口令相同'); return; }
+  try{
+    await api('/api/settings', {method:'PUT', body: JSON.stringify({api_token: v})});
+    if(v) localStorage.setItem('smsgw_token', v);
+    else localStorage.removeItem('smsgw_token');
+    toast(v ? '口令已生效，页面将刷新' : '鉴权已关闭，页面将刷新');
+    // 本页所有请求用的口令在页面加载时固定，必须整页刷新换成新的，
+    // 否则旧口令 401 会弹输入框死循环
+    setTimeout(() => location.reload(), 900);
+  }catch(e){ toast('保存失败：' + e.message); }
 });
 
 $('#d-add').addEventListener('click', () => openDDNSForm(null));

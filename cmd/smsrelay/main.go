@@ -193,6 +193,8 @@ type App struct {
 	mu     sync.Mutex // 保护 states
 	states map[string]*smsState
 
+	cfgMu sync.Mutex // 保护 cfg.APIToken 的读写与 config.json 回写
+
 	sendMu sync.Mutex // 发送串行化，避免多路并发挤爆 modem
 }
 
@@ -1031,6 +1033,16 @@ func (a *App) UpdateSettings(kv map[string]string) error {
 			if err := a.store.SetSetting("retain_days", strconv.Itoa(days)); err != nil {
 				return err
 			}
+		case "api_token":
+			// 界面可直接设置/更换/清空接口口令。写 config.json 而不是 settings 表：
+			// CLI（scripts/sms）要靠读文件自动带鉴权头，且这是启动项语义。
+			v = strings.TrimSpace(v)
+			if v != "" && (len(v) < 6 || len(v) > 128) {
+				return fmt.Errorf("接口口令长度需在 6~128 之间（留空 = 关闭鉴权）")
+			}
+			if err := a.setAPIToken(v); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("不支持的设置项: %s", k)
 		}
@@ -1157,7 +1169,51 @@ func (a *App) retentionLoop(ctx context.Context, iv time.Duration) {
 }
 
 // Token 返回 API 访问口令，空表示不鉴权。
-func (a *App) Token() string { return a.cfg.APIToken }
+func (a *App) Token() string {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	return a.cfg.APIToken
+}
+
+// setAPIToken 更新接口口令：立即生效（Token() 读的就是这份 cfg），
+// 并原子回写 config.json —— 持久化与 CLI（scripts/sms 自动读文件带鉴权）都靠它。
+// v 为空表示关闭鉴权。写坏配置文件的风险用「临时文件 + rename」规避。
+func (a *App) setAPIToken(v string) error {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+
+	path := a.cfgPath
+	if path == "" {
+		// 启动时没有任何配置文件（全默认值）。写口令就必须落一个文件。
+		path = "/etc/smsrelay/config.json"
+		a.cfgPath = path
+	}
+
+	tmp := path + ".tmp"
+	// 先改内存再落盘：marshal 的必须是新值，否则文件里永远是上一代口令
+	old := a.cfg.APIToken
+	a.cfg.APIToken = v
+	buf, err := json.MarshalIndent(a.cfg, "", "  ")
+	if err != nil {
+		a.cfg.APIToken = old
+		return err
+	}
+	if err := os.WriteFile(tmp, append(buf, '\n'), 0o600); err != nil {
+		a.cfg.APIToken = old
+		return fmt.Errorf("写入配置失败: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		a.cfg.APIToken = old
+		return fmt.Errorf("替换配置失败: %w", err)
+	}
+	if v == "" {
+		log.Printf("API 鉴权已关闭（api_token 清空）")
+	} else {
+		log.Printf("API 鉴权口令已更新并写入 %s", path)
+	}
+	return nil
+}
 
 // ---------------------------------------------------------------------------
 // 转发通道管理（api.Backend）

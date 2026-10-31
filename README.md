@@ -149,7 +149,9 @@ systemctl start smsrelay
 }
 ```
 
-- `api_token` 为空表示不鉴权；非空时需 `X-Token` 头或 `?token=`
+- `api_token` 为空表示不鉴权；非空时需 `X-Token` 头或 `?token=`。
+  可在 Web 设置页直接设置/更换/清除（立即生效并回写本文件，`sms` CLI 自动跟随），
+  不必手动编辑；写好后浏览器会自动记住，CLI 靠本文件自动带鉴权头
 - `web_dir` 存在时优先用外部 `index.html`，改页面不用重编译
 - `guard_interval` 是兜底轮询秒数，设 0 用默认 60
 - 上面所有值都是**占位值**：`own_number` 换成你自己的号码（留空则跟随 SIM 卡），`access_token` 换成真实 token
