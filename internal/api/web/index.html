@@ -27,6 +27,16 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
 .dot{width:7px;height:7px;border-radius:50%;background:var(--err);margin-left:auto;box-shadow:0 0 0 4px rgba(242,109,109,.12)}
 .dot.on{background:var(--in);box-shadow:0 0 0 4px rgba(61,220,151,.12)}
 
+/* Tab 导航 */
+.tabs{display:flex;gap:4px;background:var(--bg2);border:1px solid var(--line);border-radius:12px;
+  padding:3px;margin-bottom:14px;overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tabs button{flex:1 0 auto;background:none;border:0;color:var(--fg2);font:inherit;font-size:12.5px;
+  padding:8px 12px;border-radius:9px;cursor:pointer;white-space:nowrap}
+.tabs button.act{background:var(--bg3);color:var(--fg);font-weight:600}
+.panel{display:none}
+.panel.act{display:block}
+
 /* 状态卡 */
 .status{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px}
 .sc{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:10px 11px;min-width:0}
@@ -35,6 +45,7 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
 .sc .v.dim{color:var(--fg2);font-weight:500}
 .bar{height:3px;border-radius:2px;background:var(--bg3);margin-top:7px;overflow:hidden}
 .bar i{display:block;height:100%;background:linear-gradient(90deg,#4c9aff,#3ddc97);width:0;transition:width .4s}
+.bar i.hot{background:linear-gradient(90deg,#f0a35e,#f26d6d)}
 
 /* 工具条 */
 .tools{display:flex;gap:8px;margin-bottom:12px;align-items:center}
@@ -70,10 +81,44 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
 .more{display:block;width:100%;margin-top:12px;padding:11px;background:var(--bg2);border:1px solid var(--line);
   border-radius:11px;color:var(--fg2);font:inherit;font-size:13px;cursor:pointer}
 
+/* 系统指标 */
+.grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:10px}
+.metric{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:11px 12px}
+.metric .k{font-size:10.5px;color:var(--fg3);margin-bottom:4px}
+.metric .v{font-size:22px;font-weight:650;letter-spacing:-.4px;line-height:1.2}
+.metric .v small{font-size:11px;font-weight:400;color:var(--fg3);margin-left:2px}
+.metric .sub{font-size:11px;color:var(--fg3);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rows{background:var(--bg2);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-bottom:10px}
+.rw{display:flex;justify-content:space-between;gap:12px;padding:9px 12px;font-size:12.5px;border-bottom:1px solid var(--line)}
+.rw:last-child{border-bottom:0}
+.rw .k{color:var(--fg3);flex:0 0 auto}
+.rw .v{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sec-title{font-size:11.5px;color:var(--fg3);margin:16px 2px 8px;letter-spacing:.3px}
+.sec-title:first-child{margin-top:0}
+
+/* 设置 */
+.field{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}
+.field label{display:block;font-size:11.5px;color:var(--fg3);margin-bottom:6px}
+.field .hint{font-size:11px;color:var(--fg3);margin-top:7px;line-height:1.6}
+.field input,.field select{width:100%;background:var(--bg3);border:1px solid var(--line);border-radius:9px;
+  color:var(--fg);font:inherit;font-size:13.5px;padding:9px 11px;outline:0}
+.field input:focus{border-color:var(--accent2)}
+.field .act{display:flex;gap:8px;margin-top:9px}
+.btn{padding:8px 16px;border:0;border-radius:9px;background:var(--accent2);color:#fff;
+  font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+.btn.ghost{background:var(--bg3);color:var(--fg2)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.badge{display:inline-block;font-size:10px;padding:1px 7px;border-radius:5px;margin-left:6px;vertical-align:middle;font-weight:500}
+.badge.ok{background:rgba(61,220,151,.13);color:var(--in)}
+.badge.warn{background:rgba(240,163,94,.13);color:var(--warn)}
+.badge.err{background:rgba(242,109,109,.13);color:var(--err)}
+.notice{background:rgba(240,163,94,.1);border:1px solid rgba(240,163,94,.28);color:var(--warn);
+  border-radius:10px;padding:9px 11px;font-size:12px;margin-bottom:10px;line-height:1.55}
+
 /* 发送面板 */
 .compose{position:fixed;left:0;right:0;bottom:0;background:rgba(15,17,21,.94);
   backdrop-filter:blur(14px);border-top:1px solid var(--line);padding:10px 14px calc(10px + env(safe-area-inset-bottom));
-  transform:translateY(110%);transition:transform .25s cubic-bezier(.4,0,.2,1)}
+  transform:translateY(110%);transition:transform .25s cubic-bezier(.4,0,.2,1);z-index:8}
 .compose.open{transform:translateY(0)}
 .compose .inner{max-width:920px;margin:0 auto}
 .row{display:flex;gap:8px;margin-bottom:8px}
@@ -104,28 +149,110 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
     <div class="dot" id="dot"></div>
   </header>
 
-  <div class="status">
-    <div class="sc"><div class="k">信号</div><div class="v" id="s-sig">--</div><div class="bar"><i id="s-bar"></i></div></div>
-    <div class="sc"><div class="k">网络</div><div class="v" id="s-net">--</div></div>
-    <div class="sc"><div class="k">今日 收 / 发</div><div class="v" id="s-today">--</div></div>
-    <div class="sc"><div class="k">累计归档</div><div class="v" id="s-cnt">--</div></div>
+  <div class="tabs" id="tabs">
+    <button data-tab="sms" class="act">短信</button>
+    <button data-tab="sys">系统</button>
+    <button data-tab="set">设置</button>
   </div>
 
-  <div class="tools">
-    <div class="seg" id="seg">
-      <button data-dir="" class="act">全部</button>
-      <button data-dir="in">收件</button>
-      <button data-dir="out">已发</button>
+  <!-- ============ 短信 ============ -->
+  <div class="panel act" id="pane-sms">
+    <div class="status">
+      <div class="sc"><div class="k">信号</div><div class="v" id="s-sig">--</div><div class="bar"><i id="s-bar"></i></div></div>
+      <div class="sc"><div class="k">网络</div><div class="v" id="s-net">--</div></div>
+      <div class="sc"><div class="k">今日 收 / 发</div><div class="v" id="s-today">--</div></div>
+      <div class="sc"><div class="k">累计归档</div><div class="v" id="s-cnt">--</div></div>
     </div>
-    <label class="search">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-        <circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
-      <input id="q" placeholder="搜索号码或内容" autocomplete="off">
-    </label>
+
+    <div class="tools">
+      <div class="seg" id="seg">
+        <button data-dir="" class="act">全部</button>
+        <button data-dir="in">收件</button>
+        <button data-dir="out">已发</button>
+      </div>
+      <label class="search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input id="q" placeholder="搜索号码或内容" autocomplete="off">
+      </label>
+    </div>
+
+    <div class="list" id="list"><div class="empty">加载中…</div></div>
+    <button class="more" id="more" style="display:none">加载更多</button>
   </div>
 
-  <div class="list" id="list"><div class="empty">加载中…</div></div>
-  <button class="more" id="more" style="display:none">加载更多</button>
+  <!-- ============ 系统 ============ -->
+  <div class="panel" id="pane-sys">
+    <div class="grid2">
+      <div class="metric">
+        <div class="k">CPU</div>
+        <div class="v"><span id="m-cpu">--</span><small>%</small></div>
+        <div class="sub" id="m-cpu-sub">--</div>
+        <div class="bar"><i id="m-cpu-bar"></i></div>
+      </div>
+      <div class="metric">
+        <div class="k">内存</div>
+        <div class="v"><span id="m-mem">--</span><small>MB</small></div>
+        <div class="sub" id="m-mem-sub">--</div>
+        <div class="bar"><i id="m-mem-bar"></i></div>
+      </div>
+      <div class="metric">
+        <div class="k">温度</div>
+        <div class="v"><span id="m-temp">--</span><small>°C</small></div>
+        <div class="sub" id="m-temp-sub">--</div>
+        <div class="bar"><i id="m-temp-bar"></i></div>
+      </div>
+      <div class="metric">
+        <div class="k">磁盘</div>
+        <div class="v"><span id="m-disk">--</span><small>%</small></div>
+        <div class="sub" id="m-disk-sub">--</div>
+        <div class="bar"><i id="m-disk-bar"></i></div>
+      </div>
+    </div>
+
+    <div class="sec-title">传感器</div>
+    <div class="rows" id="m-sensors"><div class="rw"><span class="k">--</span><span class="v">--</span></div></div>
+
+    <div class="sec-title">网络</div>
+    <div class="rows" id="m-net"><div class="rw"><span class="k">--</span><span class="v">--</span></div></div>
+
+    <div class="sec-title">运行</div>
+    <div class="rows" id="m-run"><div class="rw"><span class="k">--</span><span class="v">--</span></div></div>
+    <div class="sec-title" id="m-ts" style="text-align:center;margin-top:12px"></div>
+  </div>
+
+  <!-- ============ 设置 ============ -->
+  <div class="panel" id="pane-set">
+    <div id="token-warn" class="notice" style="display:none">
+      未设置访问口令。任何能访问 8088 端口的设备都能读取或修改这里的配置，建议在
+      <code>config.json</code> 里设置 <code>api_token</code>。
+    </div>
+
+    <div class="sec-title">本机号码</div>
+    <div class="field">
+      <label>用于转发内容里显示「收信号码」<span class="badge" id="own-src">--</span></label>
+      <input id="own-num" placeholder="如 13800000000，留空则跟随 SIM 卡" inputmode="tel">
+      <div class="hint">
+        优先级：手动设置 &gt; 配置文件 &gt; SIM 卡。很多卡不写本机号码（这张就没有），
+        所以读不到时在这里填一次即可。
+      </div>
+      <div class="act">
+        <button class="btn" id="own-save">保存</button>
+        <button class="btn ghost" id="own-clear">清空</button>
+      </div>
+    </div>
+
+    <div class="sec-title">转发通道</div>
+    <div class="field">
+      <div class="hint">多通道配置（钉钉 / 自定义 webhook）将在下一阶段上线，当前仍使用配置文件里的钉钉设置。</div>
+    </div>
+
+    <div class="sec-title">访问</div>
+    <div class="field">
+      <div class="hint" id="set-api">接口口令：--</div>
+      <div class="hint" id="set-ver">服务版本：--</div>
+    </div>
+  </div>
 </div>
 
 <button class="fab" id="fab">+</button>
@@ -150,6 +277,7 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
 <script>
 const $ = s => document.querySelector(s);
 let dir = "", offset = 0, limit = 30, total = 0, timer = null, loading = false;
+let curTab = 'sms', sysTimer = null;
 const TOKEN = localStorage.getItem('smsgw_token') || '';
 const H = TOKEN ? {'X-Token': TOKEN} : {};
 
@@ -172,6 +300,7 @@ async function api(path, opt){
   return r.json();
 }
 
+/* ---------------- 短信 ---------------- */
 async function loadStatus(){
   try{
     const s = await api('/api/status');
@@ -239,6 +368,112 @@ async function loadMessages(reset){
   loading = false;
 }
 
+/* ---------------- 系统 ---------------- */
+function fmtUptime(sec){
+  if(!sec) return '--';
+  const d = Math.floor(sec/86400), h = Math.floor(sec%86400/3600), m = Math.floor(sec%3600/60);
+  if(d) return `${d} 天 ${h} 小时`;
+  if(h) return `${h} 小时 ${m} 分`;
+  return `${m} 分`;
+}
+function fmtBps(v){
+  if(v == null) return '--';
+  if(v >= 1048576) return (v/1048576).toFixed(1) + ' MB/s';
+  if(v >= 1024) return (v/1024).toFixed(1) + ' KB/s';
+  return v + ' B/s';
+}
+function pctColor(el, v, hot){
+  el.classList.toggle('hot', hot);
+  el.style.width = Math.max(0, Math.min(100, v)) + '%';
+}
+
+async function loadSystem(){
+  try{
+    const s = await api('/api/system');
+    if(!s || !s.cpu){ return; }
+
+    $('#m-cpu').textContent = (s.cpu.percent || 0).toFixed(1);
+    const l = s.cpu.load || [0,0,0];
+    $('#m-cpu-sub').textContent = `${s.cpu.cores} 核 · ${s.cpu.freq_mhz || '--'} MHz · 负载 ${l[0].toFixed(2)}`;
+    pctColor($('#m-cpu-bar'), s.cpu.percent || 0, (s.cpu.percent||0) > 80);
+
+    const m = s.mem || {};
+    $('#m-mem').textContent = m.used_mb || 0;
+    $('#m-mem-sub').textContent = `/ ${m.total_mb || 0} MB · 可用 ${m.available_mb || 0} MB`;
+    pctColor($('#m-mem-bar'), m.total_mb ? (m.used_mb/m.total_mb*100) : 0, false);
+
+    const t = s.temp || {};
+    $('#m-temp').textContent = t.max_c ? t.max_c.toFixed(1) : '--';
+    $('#m-temp-sub').textContent = t.cpu_c ? `CPU ${t.cpu_c}°C · PMIC ${t.pmic_c || '--'}°C` : '无传感器';
+    pctColor($('#m-temp-bar'), t.max_c ? Math.min(100, (t.max_c - 20) / 60 * 100) : 0, (t.max_c||0) >= 70);
+
+    const d = s.disk || {};
+    $('#m-disk').textContent = d.percent || 0;
+    $('#m-disk-sub').textContent = `${d.used_gb || 0} / ${d.total_gb || 0} GB · 剩余 ${d.free_gb || 0} GB`;
+    pctColor($('#m-disk-bar'), d.percent || 0, (d.percent||0) > 85);
+
+    if(Array.isArray(t.sensors) && t.sensors.length){
+      $('#m-sensors').innerHTML = t.sensors
+        .sort((a,b) => b.c - a.c)
+        .map(x => `<div class="rw"><span class="k">${esc(x.name)}</span><span class="v">${x.c.toFixed(1)} °C</span></div>`)
+        .join('');
+    }
+
+    const nets = s.net || {};
+    const netRows = Object.keys(nets).map(k => {
+      const n = nets[k];
+      if(!n.available) return `<div class="rw"><span class="k">${esc(k)}</span><span class="v" style="color:var(--fg3)">${esc(n.note || '不可用')}</span></div>`;
+      return `<div class="rw"><span class="k">${esc(k)}</span><span class="v">↓${fmtBps(n.rx_bps)} ↑${fmtBps(n.tx_bps)}</span></div>`;
+    });
+    if(netRows.length) $('#m-net').innerHTML = netRows.join('');
+
+    const p = s.procs || {};
+    $('#m-run').innerHTML = `
+      <div class="rw"><span class="k">运行时长</span><span class="v">${fmtUptime(s.uptime_s)}</span></div>
+      <div class="rw"><span class="k">进程</span><span class="v">${p.running || 0} 运行 / ${p.total || 0} 总计</span></div>
+      <div class="rw"><span class="k">交换分区</span><span class="v">${m.swap_used_mb || 0} / ${m.swap_total_mb || 0} MB</span></div>`;
+    $('#m-ts').textContent = '更新于 ' + (s.ts || '').replace('T', ' ').slice(0, 19);
+  }catch(e){ }
+}
+
+/* ---------------- 设置 ---------------- */
+let sysVersion = '';
+async function loadSettings(){
+  try{
+    const s = await api('/api/settings');
+    $('#own-num').value = s.own_number || '';
+    const srcMap = {manual:'手动设置', config:'配置文件', sim:'SIM 卡', none:'未设置'};
+    const src = srcMap[s.own_number_source] || s.own_number_source || '未知';
+    const b = $('#own-src');
+    b.textContent = src;
+    b.className = 'badge ' + (s.own_number_source === 'none' ? 'err' : (s.own_number_source === 'manual' ? 'ok' : 'warn'));
+    $('#token-warn').style.display = s.api_token_set ? 'none' : 'block';
+    $('#set-api').textContent = '接口口令：' + (s.api_token_set ? '已设置' : '未设置（任何人可访问）');
+  }catch(e){ }
+}
+async function saveOwnNumber(v){
+  try{
+    await api('/api/settings', {method:'PUT', body: JSON.stringify({own_number: v})});
+    toast(v ? '已保存' : '已清空');
+    loadSettings(); loadStatus();
+  }catch(e){ toast('保存失败'); }
+}
+
+/* ---------------- Tab ---------------- */
+$('#tabs').addEventListener('click', e => {
+  const b = e.target.closest('button'); if(!b) return;
+  curTab = b.dataset.tab;
+  document.querySelectorAll('#tabs button').forEach(x => x.classList.remove('act'));
+  b.classList.add('act');
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('act'));
+  $('#pane-' + curTab).classList.add('act');
+  $('#fab').style.display = curTab === 'sms' ? '' : 'none';
+  if(curTab !== 'sms') closeCompose();
+  if(curTab === 'sys') loadSystem();
+  if(curTab === 'set') loadSettings();
+});
+
+/* ---------------- 交互 ---------------- */
 function openCompose(to){
   $('#compose').classList.add('open');
   if(to){ $('#to').value = to; $('#txt').focus(); } else { $('#to').focus(); }
@@ -259,6 +494,8 @@ $('#q').addEventListener('input', () => { clearTimeout(window._qt); window._qt =
 $('#more').addEventListener('click', () => loadMessages(false));
 $('#fab').addEventListener('click', () => openCompose());
 $('#close').addEventListener('click', closeCompose);
+$('#own-save').addEventListener('click', () => saveOwnNumber($('#own-num').value.trim()));
+$('#own-clear').addEventListener('click', () => { $('#own-num').value = ''; saveOwnNumber(''); });
 $('#list').addEventListener('click', async e => {
   const b = e.target.closest('button');
   if(b){
@@ -309,11 +546,21 @@ $('#testfw').addEventListener('click', async () => {
   }catch(e){ toast('请求失败'); }
 });
 
+/* ---------------- 启动 ---------------- */
 loadStatus(); loadMessages(true);
-timer = setInterval(() => { loadStatus(); loadMessages(true); }, 6000);
+timer = setInterval(() => {
+  if(curTab === 'sms'){ loadStatus(); loadMessages(true); }
+  else if(curTab === 'sys'){ loadSystem(); }
+}, 6000);
 document.addEventListener('visibilitychange', () => {
   if(document.hidden){ clearInterval(timer); timer = null; }
-  else if(!timer){ loadStatus(); loadMessages(true); timer = setInterval(() => { loadStatus(); loadMessages(true); }, 6000); }
+  else if(!timer){
+    if(curTab === 'sms') loadStatus();
+    timer = setInterval(() => {
+      if(curTab === 'sms'){ loadStatus(); loadMessages(true); }
+      else if(curTab === 'sys'){ loadSystem(); }
+    }, 6000);
+  }
 });
 </script>
 </body>

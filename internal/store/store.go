@@ -58,6 +58,53 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_ts ON messages(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_fw ON messages(dir, forwarded);
+
+-- 运行时设置（键值）。与 config.json 的分工：
+--   config.json 只放启动必需项（listen/port/db_path）
+--   settings 表放可在界面上改的项（own_number 等），改完立即生效
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+-- 转发通道（钉钉 / 通用 webhook）
+CREATE TABLE IF NOT EXISTS channels (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    type       TEXT NOT NULL,
+    enabled    INTEGER DEFAULT 1,
+    config     TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+-- 每个通道各自的投递结果（一条短信 × 一个通道）
+CREATE TABLE IF NOT EXISTS channel_deliveries (
+    message_id INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    status     TEXT,
+    attempts   INTEGER DEFAULT 0,
+    last_error TEXT,
+    updated_at TEXT DEFAULT (datetime('now','localtime')),
+    PRIMARY KEY (message_id, channel_id)
+);
+
+-- DDNS 记录（一条记录 = 一个域名 + 一种记录类型，A/AAAA 自由组合）
+CREATE TABLE IF NOT EXISTS ddns (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    type        TEXT NOT NULL,
+    zone_id     TEXT,
+    api_token   TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    proxied     INTEGER DEFAULT 0,
+    ttl         INTEGER DEFAULT 1,
+    enabled     INTEGER DEFAULT 1,
+    last_ip     TEXT,
+    last_update TEXT,
+    last_error  TEXT,
+    created_at  TEXT DEFAULT (datetime('now','localtime'))
+);
 `
 
 // Store 是归档库句柄。
@@ -481,4 +528,57 @@ func (s *Store) Paging24h() (Paging, error) {
 	}
 	p.Count, p.MaxDelayS, p.SlowCount = int(n.Int64), int(mx.Int64), int(slow.Int64)
 	return p, nil
+}
+
+// ---------------------------------------------------------------------------
+// 运行时设置
+// ---------------------------------------------------------------------------
+
+// GetSetting 读取一个设置项。
+func (s *Store) GetSetting(key string) (string, bool, error) {
+	var v string
+	err := s.db.QueryRow("SELECT value FROM settings WHERE key=?", key).Scan(&v)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return v, true, nil
+}
+
+// SetSetting 写入或覆盖一个设置项。
+func (s *Store) SetSetting(key, value string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO settings (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET
+		   value=excluded.value,
+		   updated_at=datetime('now','localtime')`,
+		key, value)
+	return err
+}
+
+// DeleteSetting 删除一个设置项（回到默认行为）。
+func (s *Store) DeleteSetting(key string) error {
+	_, err := s.db.Exec("DELETE FROM settings WHERE key=?", key)
+	return err
+}
+
+// AllSettings 返回全部设置项。
+func (s *Store) AllSettings() (map[string]string, error) {
+	rows, err := s.db.Query("SELECT key, value FROM settings")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]string)
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
 }

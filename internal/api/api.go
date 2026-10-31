@@ -51,18 +51,30 @@ type GatewayInfo struct {
 
 // StatusPayload 是 /api/status 的返回体。
 type StatusPayload struct {
-	Modem       interface{}  `json:"modem"`
-	OwnNumber   string       `json:"own_number"`
-	Counts      store.Counts `json:"counts"`
-	Today       store.Today  `json:"today"`
-	LastInbound string       `json:"last_inbound"`
-	Paging      store.Paging `json:"paging_24h"`
-	Gateway     GatewayInfo  `json:"gateway"`
+	Modem           interface{}  `json:"modem"`
+	OwnNumber       string       `json:"own_number"`
+	OwnNumberSource string       `json:"own_number_source"`
+	Counts          store.Counts `json:"counts"`
+	Today           store.Today  `json:"today"`
+	LastInbound     string       `json:"last_inbound"`
+	Paging          store.Paging `json:"paging_24h"`
+	Gateway         GatewayInfo  `json:"gateway"`
+}
+
+// SettingsPayload 是 /api/settings 的返回体。
+type SettingsPayload struct {
+	OwnNumber       string            `json:"own_number"`
+	OwnNumberSource string            `json:"own_number_source"`
+	Values          map[string]string `json:"values"`
+	APITokenSet     bool              `json:"api_token_set"`
 }
 
 // Backend 由 main 实现，提供业务能力。用接口是为了避免 api 反向依赖 main。
 type Backend interface {
 	Status() StatusPayload
+	System() interface{}
+	Settings() interface{}
+	UpdateSettings(map[string]string) error
 	ListMessages(q store.ListQuery) ([]store.Message, int, error)
 	SendSMS(number, text string) SendOutcome
 	ForwardTest() error
@@ -129,6 +141,20 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodGet && path == "/api/status":
 		writeJSON(w, http.StatusOK, s.backend.Status())
+
+	case r.Method == http.MethodGet && path == "/api/system":
+		v := s.backend.System()
+		if v == nil {
+			// 首次采样还没完成，返回空对象而不是 null，前端不用特判
+			v = map[string]string{}
+		}
+		writeJSON(w, http.StatusOK, v)
+
+	case r.Method == http.MethodGet && path == "/api/settings":
+		writeJSON(w, http.StatusOK, s.backend.Settings())
+
+	case r.Method == http.MethodPut && path == "/api/settings":
+		s.updateSettings(w, r)
 
 	case r.Method == http.MethodGet && path == "/api/messages":
 		s.listMessages(w, r)
@@ -198,6 +224,20 @@ func (s *Server) serveIndex(w http.ResponseWriter) {
 		}
 	}
 	writeHTML(w, embeddedIndex)
+}
+
+func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
+	var kv map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&kv); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
+		return
+	}
+	if err := s.backend.UpdateSettings(kv); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	// 回写完整设置，前端不用再发一次 GET
+	writeJSON(w, http.StatusOK, s.backend.Settings())
 }
 
 func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {

@@ -32,6 +32,7 @@ import (
 	"github.com/zhoufla/SMSRelay8916/internal/modem"
 	"github.com/zhoufla/SMSRelay8916/internal/relay"
 	"github.com/zhoufla/SMSRelay8916/internal/store"
+	"github.com/zhoufla/SMSRelay8916/internal/sysinfo"
 )
 
 // Version 是构建版本，编译时可通过 -ldflags "-X main.Version=..." 覆盖。
@@ -174,6 +175,7 @@ type App struct {
 	store    *store.Store
 	modem    *modem.Client
 	relay    *relay.DingTalk
+	sys      *sysinfo.Collector
 	startTS  time.Time
 	hostname string
 
@@ -229,6 +231,7 @@ func main() {
 		cfgPath:  usedPath,
 		store:    st,
 		modem:    modem.New(cfg.ModemIndex),
+		sys:      sysinfo.New("wlan0", "wwan0"),
 		startTS:  time.Now(),
 		hostname: hostname,
 		events:   make(chan string, 512),
@@ -250,6 +253,9 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// 0) 系统指标采样：5 秒一次，结果缓存，HTTP 请求直接读缓存
+	go app.sys.Start(ctx, 5*time.Second, nil)
 
 	// 1) 事件处理 worker（串行，避免同一对象被并发读写）
 	go app.worker(ctx)
@@ -786,19 +792,16 @@ func (a *App) Status() api.StatusPayload {
 	counts, _ := a.store.Counts()
 	today, _ := a.store.Today()
 	pg, _ := a.store.Paging24h()
-
-	own := a.cfg.OwnNumber
-	if own == "" {
-		own = st.NumberFromSIM
-	}
+	own, src := a.resolveOwnNumber(st)
 
 	return api.StatusPayload{
-		Modem:       st,
-		OwnNumber:   own,
-		Counts:      counts,
-		Today:       today,
-		LastInbound: a.store.LastInbound(),
-		Paging:      pg,
+		Modem:           st,
+		OwnNumber:       own,
+		OwnNumberSource: src,
+		Counts:          counts,
+		Today:           today,
+		LastInbound:     a.store.LastInbound(),
+		Paging:          pg,
 		Gateway: api.GatewayInfo{
 			Uptime:   int(time.Since(a.startTS).Seconds()),
 			Hostname: a.hostname,
@@ -806,6 +809,69 @@ func (a *App) Status() api.StatusPayload {
 			Version:  Version,
 		},
 	}
+}
+
+// resolveOwnNumber 解析本机号码，返回号码与来源。
+//
+// 优先级：界面手动设置 > config.json > SIM 卡 > 空。
+// SIM 里读不到号码是常态（很多卡不写 EF_MSISDN，本机这张就没有），
+// 所以必须允许手动兜底，否则转发内容里永远缺"收信号码"。
+func (a *App) resolveOwnNumber(st *modem.Status) (string, string) {
+	if v, ok, err := a.store.GetSetting("own_number"); err == nil && ok {
+		if v = strings.TrimSpace(v); v != "" {
+			return v, "manual"
+		}
+	}
+	if v := strings.TrimSpace(a.cfg.OwnNumber); v != "" {
+		return v, "config"
+	}
+	if st != nil {
+		if v := strings.TrimSpace(st.NumberFromSIM); v != "" && v != "--" {
+			return v, "sim"
+		}
+	}
+	return "", "none"
+}
+
+// System 返回最近一次系统指标采样（由后台 goroutine 每 5 秒刷新）。
+func (a *App) System() interface{} {
+	return a.sys.Last()
+}
+
+// Settings 返回界面可修改的设置项。敏感字段已脱敏。
+func (a *App) Settings() interface{} {
+	own, src := a.resolveOwnNumber(a.modem.Status())
+	values, _ := a.store.AllSettings()
+	if values == nil {
+		values = map[string]string{}
+	}
+	return api.SettingsPayload{
+		OwnNumber:       own,
+		OwnNumberSource: src,
+		Values:          values,
+		APITokenSet:     a.cfg.APIToken != "",
+	}
+}
+
+// UpdateSettings 更新设置项。目前只支持 own_number。
+func (a *App) UpdateSettings(kv map[string]string) error {
+	for k, v := range kv {
+		switch k {
+		case "own_number":
+			v = strings.TrimSpace(v)
+			if v == "" {
+				// 清空 = 回到「跟随 SIM / 配置文件」
+				if err := a.store.DeleteSetting("own_number"); err != nil {
+					return err
+				}
+			} else if err := a.store.SetSetting("own_number", v); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("不支持的设置项: %s", k)
+		}
+	}
+	return nil
 }
 
 // ListMessages 分页查询归档。
