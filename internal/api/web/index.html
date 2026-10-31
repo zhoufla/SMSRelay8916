@@ -89,6 +89,18 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
   background:rgba(76,154,255,.07);border:1px solid rgba(76,154,255,.25);border-radius:10px;padding:7px 11px;font-size:12.5px}
 .batchbar label{display:flex;align-items:center;gap:6px;color:var(--fg2);cursor:pointer;margin-right:auto}
 
+/* Wi-Fi */
+.sig{display:inline-flex;align-items:flex-end;gap:2px;height:12px;flex:0 0 auto}
+.sig i{width:3px;border-radius:1px;background:var(--line)}
+.sig i:nth-child(1){height:4px}.sig i:nth-child(2){height:6px}
+.sig i:nth-child(3){height:9px}.sig i:nth-child(4){height:12px}
+.sig i.on{background:var(--accent)}
+.wrow{display:flex;gap:9px;align-items:center;padding:9px 11px;border-bottom:1px solid var(--line);cursor:pointer;font-size:13px}
+.wrow:last-child{border-bottom:0}
+.wrow .wn{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wrow .btn{padding:4px 11px;font-size:12px}
+.wrow[data-busy="1"]{opacity:.55;pointer-events:none}
+
 /* 日志 */
 .logrow{display:flex;gap:10px;padding:5px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   font-size:11.5px;border-bottom:1px solid var(--line);line-height:1.5}
@@ -322,6 +334,24 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
     <button class="btn" id="ch-add" style="width:100%">+ 新增通道</button>
     <div class="hint" style="margin-top:8px">
       短信会推送给所有启用的通道。每个通道的投递结果独立记录，某个通道故障不影响其它通道。
+    </div>
+
+    <div class="sec-title">Wi-Fi</div>
+    <div class="field">
+      <label>当前连接<span class="badge" id="wifi-badge">--</span></label>
+      <div class="hint" id="wifi-cur">加载中…</div>
+      <div class="act">
+        <button class="btn ghost" id="wifi-scan">扫描周边网络</button>
+      </div>
+    </div>
+    <div id="wifi-list" style="display:none"></div>
+    <div class="field" id="wifi-saved-field" style="display:none">
+      <label>已保存的网络</label>
+      <div id="wifi-saved"></div>
+    </div>
+    <div class="hint">
+      连接成功后设备 IP 可能变化，之后请用新地址访问。连接失败会自动回连原来的网络，
+      短信通道走 LTE 不受影响。当前连接的配置不允许删除（防止失联）。
     </div>
 
     <div class="sec-title">访问</div>
@@ -851,7 +881,7 @@ $('#tabs').addEventListener('click', e => {
   $('#fab').style.display = curTab === 'sms' ? '' : 'none';
   if(curTab !== 'sms') closeCompose();
   if(curTab === 'sys') loadSystem();
-  if(curTab === 'set') loadSettings();
+  if(curTab === 'set'){ loadSettings(); loadWifi(); }
   if(curTab === 'ddns') loadDDNS();
   if(curTab === 'log') loadLogs();
 });
@@ -926,6 +956,84 @@ $('#token-save').addEventListener('click', async () => {
     // 否则旧口令 401 会弹输入框死循环
     setTimeout(() => location.reload(), 900);
   }catch(e){ toast('保存失败：' + e.message); }
+});
+
+/* ---------------- Wi-Fi ---------------- */
+function sigBars(p){
+  const n = p >= 80 ? 4 : p >= 55 ? 3 : p >= 30 ? 2 : p >= 10 ? 1 : 0;
+  let s = '';
+  for(let i = 1; i <= 4; i++) s += '<i class="' + (i <= n ? 'on' : '') + '"></i>';
+  return '<span class="sig">' + s + '</span>';
+}
+const lockSvg = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
+
+async function loadWifi(){
+  try{
+    const st = await api('/api/wifi/status');
+    const b = $('#wifi-badge');
+    b.textContent = st.ssid ? '已连接' : '未连接';
+    b.className = 'badge ' + (st.ssid ? 'ok' : 'err');
+    $('#wifi-cur').innerHTML = st.ssid
+      ? sigBars(st.signal) + ' <b>' + esc(st.ssid) + '</b>　IP ' + esc(st.ip || '--')
+      : '未连接 Wi-Fi（数据走 LTE）';
+  }catch(e){ $('#wifi-cur').textContent = '加载失败：' + e.message; }
+  try{
+    const r = await api('/api/wifi/saved');
+    const items = r.items || [];
+    $('#wifi-saved-field').style.display = items.length ? 'block' : 'none';
+    $('#wifi-saved').innerHTML = items.map(p =>
+      '<div class="wrow" style="cursor:default"><span class="wn">' + esc(p.name) + '</span>' +
+      (p.active ? '<span class="tag in">当前</span>' : '<button class="btn ghost" data-forget="' + esc(p.name) + '">忘记</button>') +
+      '</div>').join('');
+  }catch(e){ }
+}
+$('#wifi-scan').addEventListener('click', async () => {
+  const b = $('#wifi-scan');
+  b.disabled = true; b.textContent = '扫描中…';
+  try{
+    const r = await api('/api/wifi/scan');
+    const items = r.items || [];
+    $('#wifi-list').style.display = items.length ? 'block' : 'none';
+    $('#wifi-list').innerHTML = items.length ? items.map(n =>
+      '<div class="wrow" data-ssid="' + esc(n.ssid) + '" data-sec="' + esc(n.security) + '">' +
+      sigBars(n.signal) + '<span class="wn">' + esc(n.ssid) + '</span>' +
+      (n.security ? lockSvg : '') +
+      (n.active ? '<span class="tag in">当前</span>' : '') + '</div>').join('')
+      : '<div class="empty">没扫到网络</div>';
+  }catch(e){ toast('扫描失败：' + e.message); }
+  b.disabled = false; b.textContent = '扫描周边网络';
+});
+$('#wifi-list').addEventListener('click', async e => {
+  const row = e.target.closest('.wrow');
+  if(!row || row.dataset.busy) return;
+  const ssid = row.dataset.ssid, sec = row.dataset.sec;
+  let pw = '';
+  if(sec){
+    pw = prompt('输入 «' + ssid + '» 的密码：');
+    if(pw === null) return;
+    if(!pw){ toast('加密网络需要密码'); return; }
+  }
+  row.dataset.busy = '1';
+  const wn = row.querySelector('.wn'), old = wn.textContent;
+  wn.textContent = old + '　连接中…（最长约 50 秒）';
+  try{
+    await api('/api/wifi/connect', {method:'POST', body: JSON.stringify({ssid, password: pw})});
+    toast('已连接 ' + ssid);
+  }catch(err){ toast('连接失败：' + err.message); }
+  wn.textContent = old;
+  row.dataset.busy = '';
+  loadWifi();
+});
+$('#wifi-saved').addEventListener('click', async e => {
+  const b = e.target.closest('[data-forget]');
+  if(!b) return;
+  const name = b.dataset.forget;
+  if(!confirm('忘记 «' + name + '»？下次连接需要重新输入密码。')) return;
+  try{
+    await api('/api/wifi/saved/' + encodeURIComponent(name), {method:'DELETE'});
+    toast('已忘记 ' + name);
+    loadWifi();
+  }catch(err){ toast('失败：' + err.message); }
 });
 
 $('#d-add').addEventListener('click', () => openDDNSForm(null));

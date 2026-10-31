@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -39,6 +40,7 @@ import (
 	"github.com/zhoufla/SMSRelay8916/internal/otp"
 	"github.com/zhoufla/SMSRelay8916/internal/store"
 	"github.com/zhoufla/SMSRelay8916/internal/sysinfo"
+	"github.com/zhoufla/SMSRelay8916/internal/wifi"
 )
 
 // Version 是构建版本，编译时可通过 -ldflags "-X main.Version=..." 覆盖。
@@ -185,6 +187,7 @@ type App struct {
 	sys      *sysinfo.Collector
 	bus      *eventbus.Bus
 	logs     *logbuf.Buffer // 运行日志环形缓冲，供 /api/logs 查看
+	wifi     *wifi.Client   // Wi-Fi 管理（nmcli 封装）
 	startTS  time.Time
 	hostname string
 
@@ -250,6 +253,7 @@ func main() {
 		sys:      sysinfo.New("wlan0", "wwan0"),
 		bus:      bus,
 		logs:     ring,
+		wifi:     wifi.New("wlan0"),
 		startTS:  time.Now(),
 		hostname: hostname,
 		events:   make(chan string, 512),
@@ -1122,6 +1126,52 @@ func (a *App) CleanupNow() (int64, error) {
 // Logs 返回内存环形缓冲里的运行日志。
 func (a *App) Logs(limit int, level string) []logbuf.Entry {
 	return a.logs.Snapshot(limit, level)
+}
+
+// ---- Wi-Fi 管理（nmcli 封装，见 internal/wifi）----
+
+// WifiStatus 当前连接 + wlan0 的 IPv4 地址。
+func (a *App) WifiStatus() (wifi.Status, error) {
+	st, err := a.wifi.Status()
+	if err != nil {
+		return st, err
+	}
+	st.IP = lanIP("wlan0")
+	return st, nil
+}
+
+func (a *App) WifiScan() ([]wifi.Network, error)  { return a.wifi.Scan() }
+func (a *App) WifiSaved() ([]wifi.Profile, error) { return a.wifi.Saved() }
+
+func (a *App) WifiConnect(ssid, password string) error {
+	if err := a.wifi.Connect(ssid, password); err != nil {
+		return err
+	}
+	log.Printf("Wi-Fi 已连接: %s", ssid)
+	return nil
+}
+
+func (a *App) WifiForget(name string) error {
+	if err := a.wifi.Forget(name); err != nil {
+		return err
+	}
+	log.Printf("Wi-Fi 配置已删除: %s", name)
+	return nil
+}
+
+// lanIP 取 iface 上第一个全局 IPv4；没有返回空串。
+func lanIP(iface string) string {
+	ni, err := net.InterfaceByName(iface)
+	if err != nil {
+		return ""
+	}
+	addrs, _ := ni.Addrs()
+	for _, a := range addrs {
+		if ipn, ok := a.(*net.IPNet); ok && ipn.IP.To4() != nil && !ipn.IP.IsLoopback() {
+			return ipn.IP.String()
+		}
+	}
+	return ""
 }
 
 // retentionLoop 周期清理超过保留天数的归档记录。

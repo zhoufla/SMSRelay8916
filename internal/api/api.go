@@ -7,10 +7,12 @@ package api
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -24,6 +26,7 @@ import (
 	"github.com/zhoufla/SMSRelay8916/internal/forward"
 	"github.com/zhoufla/SMSRelay8916/internal/logbuf"
 	"github.com/zhoufla/SMSRelay8916/internal/store"
+	"github.com/zhoufla/SMSRelay8916/internal/wifi"
 )
 
 //go:embed web/index.html
@@ -90,6 +93,12 @@ type Backend interface {
 	CleanupNow() (int64, error)
 	// 内存环形缓冲里的运行日志
 	Logs(limit int, level string) []logbuf.Entry
+	// Wi-Fi 管理（nmcli 封装；连接是同步长操作，最长约 50s）
+	WifiStatus() (wifi.Status, error)
+	WifiScan() ([]wifi.Network, error)
+	WifiConnect(ssid, password string) error
+	WifiSaved() ([]wifi.Profile, error)
+	WifiForget(name string) error
 	ListChannels() ([]forward.Channel, error)
 	CreateChannel(*forward.Channel) error
 	UpdateChannel(*forward.Channel) error
@@ -248,6 +257,74 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 			items = []logbuf.Entry{}
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
+
+	// ---- Wi-Fi 管理 ----
+	case r.Method == http.MethodGet && path == "/api/wifi/status":
+		st, err := s.backend.WifiStatus()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, st)
+
+	case r.Method == http.MethodGet && path == "/api/wifi/scan":
+		items, err := s.backend.WifiScan()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if items == nil {
+			items = []wifi.Network{}
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
+
+	case r.Method == http.MethodPost && path == "/api/wifi/connect":
+		var body struct {
+			SSID     string `json:"ssid"`
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
+			return
+		}
+		if strings.TrimSpace(body.SSID) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ssid 不能为空"})
+			return
+		}
+		// 同步等结果：连接含 DHCP 最长 ~50s，前端要把超时放宽
+		if err := s.backend.WifiConnect(body.SSID, body.Password); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+
+	case r.Method == http.MethodGet && path == "/api/wifi/saved":
+		items, err := s.backend.WifiSaved()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if items == nil {
+			items = []wifi.Profile{}
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
+
+	case r.Method == http.MethodDelete && strings.HasPrefix(path, "/api/wifi/saved/"):
+		// 必须放在通用 DELETE 分支之前，否则会被按消息 id 的正则吃掉
+		name, err := url.PathUnescape(strings.TrimPrefix(path, "/api/wifi/saved/"))
+		if err != nil || name == "" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		if err := s.backend.WifiForget(name); err != nil {
+			if errors.Is(err, wifi.ErrActiveProfile) {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 
 	case r.Method == http.MethodPost && path == "/api/send":
 		s.send(w, r)
