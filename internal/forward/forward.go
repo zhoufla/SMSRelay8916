@@ -41,6 +41,13 @@ type Config struct {
 	Method       string            `json:"method,omitempty"`
 	Headers      map[string]string `json:"headers,omitempty"`
 	BodyTemplate string            `json:"body_template,omitempty"`
+
+	// 转发条件（全部为空/false = 接收所有消息；非空条件之间 AND 组合）。
+	// 存在 Config JSON 里，channels 表零迁移。fwd-test 不走这些条件。
+	MatchPeer        string `json:"match_peer,omitempty"`         // 对端号码前缀，逗号分隔，任一命中
+	MatchKeyword     string `json:"match_keyword,omitempty"`      // 正文关键词，任一命中
+	MatchSkipKeyword string `json:"match_skip_keyword,omitempty"` // 排除关键词，任一命中则跳过该通道
+	MatchCodeOnly    bool   `json:"match_code_only,omitempty"`    // 仅入站且提取到验证码的消息
 }
 
 // Channel 是一条转发通道。
@@ -53,6 +60,61 @@ type Channel struct {
 
 	// 最近一次投递结果，仅用于界面展示，不从数据库读
 	LastError string `json:"last_error,omitempty"`
+}
+
+// Matches 判断消息是否满足该通道的转发条件（条件字段见 Config）。
+func (ch Channel) Matches(v Vars) bool { return ch.Config.MatchRule(v) }
+
+// MatchRule 是条件匹配的核心逻辑：
+//   - 全部条件为空/false = 接收所有消息（向后兼容老配置）
+//   - 非空条件之间 AND；每个条件内部是「逗号分隔、任一命中」
+//   - 排除关键词优先级高于命中关键词：同时命中时跳过
+func (c Config) MatchRule(v Vars) bool {
+	if c.MatchPeer != "" && !matchAnyPrefix(v.Number, c.MatchPeer) {
+		return false
+	}
+	if c.MatchKeyword != "" && !containsAny(v.Body, c.MatchKeyword) {
+		return false
+	}
+	if c.MatchSkipKeyword != "" && containsAny(v.Body, c.MatchSkipKeyword) {
+		return false
+	}
+	if c.MatchCodeOnly && (v.Direction != "in" || v.Code == "") {
+		return false
+	}
+	return true
+}
+
+// matchAnyPrefix 判断 s 是否以 list（逗号分隔）中任一项为前缀。
+// 用前缀而不是全等：106 这类运营商号段靠前缀圈定。
+func matchAnyPrefix(s, list string) bool {
+	for _, p := range splitList(list) {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsAny 判断 s 是否包含 list（逗号分隔）中任一项。
+func containsAny(s, list string) bool {
+	for _, k := range splitList(list) {
+		if strings.Contains(s, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// splitList 逗号分隔、去首尾空白、丢弃空项。
+func splitList(list string) []string {
+	var out []string
+	for _, p := range strings.Split(list, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // Vars 是模板变量。键名与 {{xxx}} 占位符对应。

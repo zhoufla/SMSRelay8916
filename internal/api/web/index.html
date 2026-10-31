@@ -325,6 +325,17 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
           直接写 <code>"text": {{body_json}}</code>，不要再套一层引号）、{{ts}}、{{id}}
         </div>
       </div>
+      <div class="sec-title" style="margin-top:14px">转发条件（空 = 全部接收）</div>
+      <label style="margin-top:10px">对端号码前缀（逗号分隔，任一命中）</label>
+      <input id="ch-match-peer" placeholder="如 106,10086">
+      <label style="margin-top:10px">正文关键词（任一命中）</label>
+      <input id="ch-match-kw" placeholder="如 验证码">
+      <label style="margin-top:10px">排除关键词（任一命中则跳过该通道）</label>
+      <input id="ch-match-skip" placeholder="如 推广,退订回T">
+      <label style="margin-top:10px;display:flex;align-items:center;gap:7px;cursor:pointer">
+        <input type="checkbox" id="ch-match-code" class="sel">仅转发验证码短信
+      </label>
+      <div class="hint">多个条件同时满足才转发到该通道。「测试」按钮不走条件，始终直发一条。</div>
       <div class="act">
         <button class="btn" id="ch-save">保存</button>
         <button class="btn ghost" id="ch-cancel">取消</button>
@@ -691,11 +702,19 @@ function renderChannels(){
   }
   $('#ch-list').innerHTML = channels.map(c => {
     const t = c.type === 'dingtalk' ? '钉钉' : 'Webhook';
+    const m = c.config || {};
+    const rules = [];
+    if(m.match_code_only) rules.push('仅验证码');
+    if(m.match_peer) rules.push(esc(m.match_peer) + '*');
+    if(m.match_keyword) rules.push('含:' + esc(m.match_keyword));
+    if(m.match_skip_keyword) rules.push('排除:' + esc(m.match_skip_keyword));
+    const ruleHtml = rules.length
+      ? '<span class="badge ok">' + rules.join('</span><span class="badge ok">') + '</span>' : '';
     return `<div class="field">
       <div style="display:flex;align-items:center;gap:7px;margin-bottom:6px;flex-wrap:wrap">
         <strong style="font-size:13.5px">${esc(c.name)}</strong>
         <span class="badge ${c.enabled ? 'ok' : 'err'}">${c.enabled ? '启用' : '停用'}</span>
-        <span class="badge warn">${t}</span>
+        <span class="badge warn">${t}</span>${ruleHtml}
       </div>
       <div style="font-size:11px;color:var(--fg3);word-break:break-all;line-height:1.5">${esc(c.config.url)}</div>
       <div class="act">
@@ -732,6 +751,10 @@ function openChannelForm(ch){
   $('#ch-method').value = ch ? (ch.config.method || '') : '';
   $('#ch-headers').value = (ch && ch.config.headers) ? JSON.stringify(ch.config.headers) : '';
   $('#ch-template').value = ch ? (ch.config.body_template || '') : '';
+  $('#ch-match-peer').value = ch ? (ch.config.match_peer || '') : '';
+  $('#ch-match-kw').value = ch ? (ch.config.match_keyword || '') : '';
+  $('#ch-match-skip').value = ch ? (ch.config.match_skip_keyword || '') : '';
+  $('#ch-match-code').checked = !!(ch && ch.config.match_code_only);
   toggleChannelType();
   $('#ch-form').scrollIntoView({behavior:'smooth', block:'nearest'});
 }
@@ -739,6 +762,15 @@ function openChannelForm(ch){
 async function saveChannel(){
   const type = $('#ch-type').value;
   const cfg = { url: $('#ch-url').value.trim(), prefix: $('#ch-prefix').value.trim() };
+
+  // 转发条件：空值不写，保持 Config JSON 干净
+  const mp = $('#ch-match-peer').value.trim();
+  if(mp) cfg.match_peer = mp;
+  const mk = $('#ch-match-kw').value.trim();
+  if(mk) cfg.match_keyword = mk;
+  const ms = $('#ch-match-skip').value.trim();
+  if(ms) cfg.match_skip_keyword = ms;
+  if($('#ch-match-code').checked) cfg.match_code_only = true;
 
   if(type === 'dingtalk'){
     const sec = $('#ch-secret').value.trim();

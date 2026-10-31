@@ -157,3 +157,65 @@ func TestRenderCodeJSON(t *testing.T) {
 		t.Fatalf("空 code 应渲染为空串: %q", m2["code"])
 	}
 }
+
+// 条件匹配：空条件 = 全过（向后兼容老配置）；非空条件 AND；
+// 排除关键词优先于命中关键词；code_only 对出站与无码消息恒 false。
+func TestMatchRule(t *testing.T) {
+	codeIn := baseVars() // 10086, in
+	codeIn.Code = "483921"
+	codeIn.Body = "您的验证码483921，2分钟内有效"
+
+	cases := []struct {
+		name string
+		cfg  Config
+		v    Vars
+		want bool
+	}{
+		{"无条件全过", Config{}, codeIn, true},
+		{"无条件全过-出站", Config{}, baseOut(), true},
+		{"前缀命中", Config{MatchPeer: "106,10086"}, codeIn, true},
+		{"前缀未命中", Config{MatchPeer: "106"}, codeIn, false},
+		{"前缀是前缀不是全等", Config{MatchPeer: "1008"}, codeIn, true},
+		{"关键词命中", Config{MatchKeyword: "验证码,动态码"}, Vars{Body: "您的验证码483921", Direction: "in"}, true},
+		{"关键词未命中", Config{MatchKeyword: "验证码"}, Vars{Body: "明天开会", Direction: "in"}, false},
+		{"排除优先于命中", Config{MatchKeyword: "短信", MatchSkipKeyword: "退订"}, Vars{Body: "短信通知，退订回T", Direction: "in"}, false},
+		{"仅验证码-命中", Config{MatchCodeOnly: true}, codeIn, true},
+		{"仅验证码-出站恒false", Config{MatchCodeOnly: true}, codeOutWithFakeCode(), false},
+		{"仅验证码-无码false", Config{MatchCodeOnly: true}, baseVars(), false},
+		{"AND组合-全中", Config{MatchPeer: "10086", MatchKeyword: "验证码", MatchCodeOnly: true}, codeIn, true},
+		{"AND组合-缺一不可", Config{MatchPeer: "10086", MatchKeyword: "验证码", MatchCodeOnly: true}, baseVars(), false},
+		{"条件项空白容忍", Config{MatchPeer: " 106 , 10086 "}, Vars{Number: "10658", Direction: "in"}, true},
+	}
+	for _, tc := range cases {
+		if got := tc.cfg.MatchRule(tc.v); got != tc.want {
+			t.Errorf("%s: MatchRule = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// baseOut 返回一个出站方向的基准消息。
+func baseOut() Vars {
+	v := baseVars()
+	v.Direction = "out"
+	return v
+}
+
+// codeOutWithFakeCode 构造"出站但带码"的异常样例：code_only 必须同时要求入站。
+func codeOutWithFakeCode() Vars {
+	v := baseOut()
+	v.Code = "1234"
+	return v
+}
+
+// Channel.Matches 是 MatchRule 的薄封装，保证两者不会脱节。
+func TestChannelMatches(t *testing.T) {
+	ch := Channel{Config: Config{MatchCodeOnly: true}}
+	v := baseVars()
+	v.Code = "1234"
+	if !ch.Matches(v) {
+		t.Fatal("带码入站应命中")
+	}
+	if ch.Matches(baseVars()) {
+		t.Fatal("无码不应命中")
+	}
+}

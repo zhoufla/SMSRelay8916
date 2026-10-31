@@ -907,6 +907,11 @@ func (a *App) forwardBatch(ctx context.Context) {
 				ID:        m.ID,
 				Direction: m.Dir,
 			}
+			// 条件不满足的通道直接跳过：不投递、不记投递记录、不算失败。
+			// 若所有通道都不满足，allOK 保持 true → 消息标记 forwarded（无事可做）。
+			if !ch.Matches(v) {
+				continue
+			}
 			if err := a.sender.Send(ch, v); err != nil {
 				_ = a.store.MarkDelivery(m.ID, ch.ID, "failed", err.Error())
 				log.Printf("forward #%d -> %s 失败: %v", m.ID, ch.Name, err)
