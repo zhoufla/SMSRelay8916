@@ -150,17 +150,18 @@ ps -o rss=,pcpu= -p "$P" 2>/dev/null | awk '{printf "  RSS=%.1fMB CPU=%s%%\n", $
 echo "--- HTTP ---"
 curl -s -m 10 http://127.0.0.1:8088/api/ping || echo "  接口未响应"
 echo
-curl -s -m 15 http://127.0.0.1:8088/api/status | python3 -c '
-import sys, json
-d = json.load(sys.stdin)
-m = d["modem"]
-print("  modem  :", m["state"], "/", m["access_tech"], "/", m["registration"], "/ signal", m["signal"])
-print("  sim    :", m["imsi"], m["iccid"])
-print("  本机号码:", d.get("own_number"))
-print("  归档   :", d["counts"])
-print("  今日   :", d["today"])
-print("  版本   :", d["gateway"]["version"])
-' 2>/dev/null || echo "  状态接口解析失败"
+if command -v jq >/dev/null 2>&1; then
+    curl -s -m 15 http://127.0.0.1:8088/api/status | jq -r '
+      "  modem  : \(.modem.state) / \(.modem.access_tech) / \(.modem.registration) / signal \(.modem.signal)",
+      "  sim    : \(.modem.imsi) \(.modem.iccid)",
+      "  本机号码: \(.own_number // "-")",
+      "  归档   : 收 \(.counts.inbox) / 发 \(.counts.sent) / 总 \(.counts.total)",
+      "  今日   : 收 \(.today.inbox // 0) / 发 \(.today.sent // 0)",
+      "  版本   : \(.gateway.version)"
+    '
+else
+    echo "  （设备上没有 jq，跳过状态解析；apt-get install jq 可启用）"
+fi
 echo "--- 日志 ---"
 journalctl -u smsrelay -n 8 --no-pager | tail -8
 REMOTE

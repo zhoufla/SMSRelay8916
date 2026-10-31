@@ -4,7 +4,7 @@ jz02v10（MSM8916 / 高通 410）随身 WiFi 的短信网关。收短信、归�
 
 Go 重写版，替换早期 Python 实现（`/opt/sms-gw/sms-gw.py`）。API 与页面完全兼容，共用同一个 SQLite 归档库。
 
-> 早期 Python 版已从设备上移除，运行期只依赖这一个静态二进制；`/usr/local/bin/sms` 命令行工具改为 `curl + jq`，不再需要 python3。
+> 早期 Python 版已从设备上移除，运行期只依赖这一个静态二进制；`/usr/local/bin/sms` 命令行工具改为 `curl + jq`，**python3 也已从设备卸载**（需要时 `apt-get install python3` 装回即可）。
 
 ---
 
