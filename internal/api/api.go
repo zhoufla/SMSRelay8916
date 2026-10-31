@@ -5,7 +5,7 @@
 package api
 
 import (
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +31,18 @@ import (
 
 //go:embed web/index.html
 var embeddedIndex []byte
+
+//go:embed web/manifest.webmanifest
+var embeddedManifest []byte
+
+//go:embed web/icons
+var embeddedIcons embed.FS
+
+// iconFiles 是允许直接服务的图标白名单（防目录穿越，就两个文件不值得 FileServer）。
+var iconFiles = map[string]string{
+	"/icons/icon-192.png": "web/icons/icon-192.png",
+	"/icons/icon-512.png": "web/icons/icon-512.png",
+}
 
 // SendPart 是单条（拆分后的）发送结果。
 type SendPart struct {
@@ -172,7 +184,7 @@ func (s *Server) Listen(host string, port int) error {
 func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
-	// 首页与静态页不需要鉴权（页面本身不含数据）
+	// 首页与静态资源不需要鉴权（页面本身不含数据）
 	if path == "/" || path == "/index.html" {
 		s.serveIndex(w)
 		return
@@ -180,6 +192,21 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	if path == "/favicon.ico" {
 		w.WriteHeader(http.StatusNoContent)
 		return
+	}
+	if path == "/manifest.webmanifest" {
+		w.Header().Set("Content-Type", "application/manifest+json")
+		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Write(embeddedManifest)
+		return
+	}
+	if rel, ok := iconFiles[path]; ok {
+		b, err := embeddedIcons.ReadFile(rel)
+		if err == nil {
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Cache-Control", "max-age=604800")
+			w.Write(b)
+			return
+		}
 	}
 
 	if !s.authorized(r) {

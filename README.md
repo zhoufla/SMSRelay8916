@@ -254,6 +254,26 @@ exec ./scripts/privacy-check.sh
 | POST | `/api/messages/batch-delete` | `{"ids":[1,2,3]}` 批量删除（≤1000），连带投递记录 |
 | POST | `/api/maintenance/cleanup` | 按当前 `retain_days` 立即清一次过期记录 |
 | GET | `/api/logs?limit=300&level=warn` | 内存环形缓冲里的运行日志（最多 500 条） |
+| GET | `/api/wifi/status` / `/api/wifi/scan` / `/api/wifi/saved` | Wi-Fi 状态 / 周边扫描 / 已保存网络 |
+| POST | `/api/wifi/connect` | `{ssid, password}` 连接（同步，最长 ~50s） |
+| DELETE | `/api/wifi/saved/{name}` | 忘记网络；当前连接返回 409 |
+
+### Wi-Fi 管理
+
+设置页「Wi-Fi」区可扫描、连接（密码走界面输入）、忘记已保存网络。防自锁设计：
+活跃连接的 profile 禁止删除；连接失败 NM 自动回连原网络；短信走 LTE 不受影响。
+实现是 nmcli 封装（`internal/wifi`），固定 `LC_ALL=C` 解析，SSID/密码只走 argv。
+
+### 转发规则路由
+
+每个通道可设条件（全部为空 = 接收所有，向后兼容）：对端号码**前缀**、正文关键词、
+排除关键词、仅验证码。非空条件 AND 组合，条件内逗号分隔任一命中。所有通道都不匹配 =
+消息标记已转发（无事可做）。通道测试（fwd-test）始终旁路条件。
+
+### PWA
+
+页面带 manifest 与图标（AI 生成，512/192）。iOS Safari「添加到主屏幕」完整可用；
+Android 在 HTTP 下只能创建快捷方式，上 HTTPS 后自动升级为完整 PWA（本轮不做 HTTPS）。
 
 ### 验证码提取
 
