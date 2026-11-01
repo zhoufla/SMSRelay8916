@@ -1163,6 +1163,26 @@ func (a *App) WifiForget(name string) error {
 	return nil
 }
 
+// WifiSetAP 切到热点模式（ipv4 shared，连入终端可经 NAT 上网）。
+func (a *App) WifiSetAP(ssid, password string, channel int) error {
+	if err := a.wifi.SetAP(ssid, password, channel); err != nil {
+		log.Printf("Wi-Fi 热点切换失败: %v", err)
+		return err
+	}
+	log.Printf("Wi-Fi 已切到热点模式")
+	return nil
+}
+
+// WifiSetSTA 切回客户端模式并回连已保存的网络。
+func (a *App) WifiSetSTA() error {
+	if err := a.wifi.SetSTA(); err != nil {
+		log.Printf("Wi-Fi 切回客户端失败: %v", err)
+		return err
+	}
+	log.Printf("Wi-Fi 已切到客户端模式")
+	return nil
+}
+
 // retentionLoop 周期清理超过保留天数的归档记录。
 //
 // 放在 Go 进程内而不是 maint.sh：进程持有 DB 连接无需停服务，

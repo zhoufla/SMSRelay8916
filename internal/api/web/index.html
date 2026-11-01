@@ -357,11 +357,37 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
 
     <div class="sec-title">Wi-Fi</div>
     <div class="field">
-      <label>当前连接<span class="badge" id="wifi-badge">--</span></label>
+      <label>当前连接<span class="badge" id="wifi-badge">--</span><span class="badge" id="wifi-mode" style="display:none">--</span></label>
       <div class="hint" id="wifi-cur">加载中…</div>
       <div class="act">
         <button class="btn ghost" id="wifi-scan">扫描周边网络</button>
+        <button class="btn ghost" id="wifi-toggle-form">热点 / 客户端切换</button>
       </div>
+      <div class="hint" id="wifi-ap-note" style="display:none">
+        当前是热点模式：wlan0 被占用，无法扫描周边网络；要连接家里 Wi-Fi 请先切回客户端模式。
+      </div>
+    </div>
+    <div class="field" id="wifi-mode-form" style="display:none">
+      <label>切换到热点（AP）模式</label>
+      <div class="hint">设备发一个 Wi-Fi 热点供其它终端连接（共享上网）。切换后本页地址会变成
+        <b>http://192.168.69.1:8088</b>（热点网段），当前管理连接会断开。</div>
+      <div class="wrow" style="cursor:default">
+        <span class="wn" style="flex:1">
+          <input id="ap-ssid" placeholder="热点名称（默认沿用已有配置）" style="width:100%">
+          <input id="ap-psk" type="password" placeholder="热点密码（留空沿用已有配置）" style="width:100%;margin-top:6px">
+          <div style="margin-top:6px">信道
+            <select id="ap-chan">
+              <option value="0" selected>沿用已有配置</option>
+              <option value="1">1</option><option value="6">6</option><option value="11">11</option>
+            </select>
+          </div>
+        </span>
+        <button class="btn" id="wifi-to-ap">开热点</button>
+      </div>
+      <label style="margin-top:10px">切换到客户端（STA）模式</label>
+      <div class="hint">连接家里 / 上游 Wi-Fi 上网（推荐日常用法）。切换后本页地址变成家里路由分配的地址，
+        可在路由器后台查看，或改用 LTE 侧地址。切换会自动回连已保存的网络。</div>
+      <div class="act"><button class="btn" id="wifi-to-sta">连上游 Wi-Fi</button></div>
     </div>
     <div id="wifi-list" style="display:none"></div>
     <div class="field" id="wifi-saved-field" style="display:none">
@@ -1017,17 +1043,53 @@ async function loadWifi(){
     $('#wifi-cur').innerHTML = st.ssid
       ? sigBars(st.signal) + ' <b>' + esc(st.ssid) + '</b>　IP ' + esc(st.ip || '--')
       : '未连接 Wi-Fi（数据走 LTE）';
+    const m = $('#wifi-mode');
+    const isAP = st.mode === 'ap';
+    m.style.display = st.mode ? '' : 'none';
+    m.textContent = isAP ? '热点' : '客户端';
+    m.className = 'badge ' + (isAP ? 'warn' : 'ok');
+    $('#wifi-ap-note').style.display = isAP ? '' : 'none';
   }catch(e){ $('#wifi-cur').textContent = '加载失败：' + e.message; }
   try{
     const r = await api('/api/wifi/saved');
     const items = r.items || [];
     $('#wifi-saved-field').style.display = items.length ? 'block' : 'none';
     $('#wifi-saved').innerHTML = items.map(p =>
-      '<div class="wrow" style="cursor:default"><span class="wn">' + esc(p.name) + '</span>' +
+      '<div class="wrow" style="cursor:default"><span class="wn">' + esc(p.name) +
+      (p.mode === 'ap' ? ' <span class="tag">热点</span>' : '') + '</span>' +
       (p.active ? '<span class="tag in">当前</span>' : '<button class="btn ghost" data-forget="' + esc(p.name) + '">忘记</button>') +
       '</div>').join('');
   }catch(e){ }
 }
+$('#wifi-toggle-form').addEventListener('click', () => {
+  const f = $('#wifi-mode-form');
+  f.style.display = f.style.display === 'none' ? 'block' : 'none';
+});
+
+/* 模式切换是同步长操作（最长 ~50s），且必然断开当前管理连接：
+   前端用 90s 超时 + 明确引导。失败时 NM 按原 profile 回连，刷新即可。 */
+async function switchMode(mode, body){
+  if(mode === 'ap' && !confirm('切换到热点模式后，当前访问地址会失效，\n请改用 http://192.168.69.1:8088 重新打开本页。确定切换？')) return;
+  if(mode === 'sta' && !confirm('切换到客户端模式后，热点会关闭，\n请改用家里路由分配的新地址重新打开本页。确定切换？')) return;
+  toast('切换中…（最长约 50 秒，请勿关闭页面）');
+  try{
+    const r = await api('/api/wifi/mode', {method:'POST', body: JSON.stringify(body || {mode})});
+    const st = r.status;
+    toast('切换完成' + (st && st.ip ? '，新地址：http://' + st.ip + ':8088' : ''));
+  }catch(e){
+    toast('切换失败：' + e.message + '（若页面已打不开，请按提示的新地址重新访问）');
+  }
+  loadWifi();
+}
+$('#wifi-to-ap').addEventListener('click', () => {
+  switchMode('ap', {
+    mode: 'ap',
+    ssid: $('#ap-ssid').value.trim(),
+    password: $('#ap-psk').value,
+    channel: parseInt($('#ap-chan').value, 10) || 0
+  });
+});
+$('#wifi-to-sta').addEventListener('click', () => switchMode('sta'));
 $('#wifi-scan').addEventListener('click', async () => {
   const b = $('#wifi-scan');
   b.disabled = true; b.textContent = '扫描中…';

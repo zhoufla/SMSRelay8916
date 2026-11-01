@@ -111,6 +111,9 @@ type Backend interface {
 	WifiConnect(ssid, password string) error
 	WifiSaved() ([]wifi.Profile, error)
 	WifiForget(name string) error
+	// AP / 客户端模式切换（同样同步长操作，最长约 50s）
+	WifiSetAP(ssid, password string, channel int) error
+	WifiSetSTA() error
 	ListChannels() ([]forward.Channel, error)
 	CreateChannel(*forward.Channel) error
 	UpdateChannel(*forward.Channel) error
@@ -352,6 +355,47 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+
+	case r.Method == http.MethodPost && path == "/api/wifi/mode":
+		// AP / 客户端模式切换。切换会断开当前的管理连接：
+		//   → AP：改用热点网段（如 192.168.69.1）访问本页
+		//   → STA：改用家里路由分配的地址访问本页
+		// 前端要把超时放宽（连接/启动热点最长 ~50s）。
+		var body struct {
+			Mode     string `json:"mode"`
+			SSID     string `json:"ssid"`
+			Password string `json:"password"`
+			Channel  int    `json:"channel"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
+			return
+		}
+		var err error
+		switch body.Mode {
+		case "ap":
+			err = s.backend.WifiSetAP(strings.TrimSpace(body.SSID), body.Password, body.Channel)
+		case "sta":
+			err = s.backend.WifiSetSTA()
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": `mode 只能是 "ap" 或 "sta"`})
+			return
+		}
+		if err != nil {
+			if errors.Is(err, wifi.ErrNoSTA) {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		// 返回切换后的最新状态，前端直接展示新地址，用户照着换访问路径
+		st, serr := s.backend.WifiStatus()
+		if serr != nil {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "status": st})
 
 	case r.Method == http.MethodPost && path == "/api/send":
 		s.send(w, r)

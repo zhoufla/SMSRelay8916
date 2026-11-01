@@ -27,6 +27,12 @@ import (
 // API 层据此返回 409。
 var ErrActiveProfile = errors.New("不能删除当前连接的配置")
 
+// Wi-Fi 工作模式。wlan0 同一时刻只能处于其中一种。
+const (
+	ModeAP  = "ap"  // 热点：设备发 SSID，其它终端连进来（ipv4 shared = NAT+DHCP）
+	ModeSTA = "sta" // 客户端：设备连接家里/上游 Wi-Fi 上网
+)
+
 // Network 是扫描发现的一个 Wi-Fi 网络。
 type Network struct {
 	SSID     string `json:"ssid"`
@@ -39,12 +45,14 @@ type Network struct {
 type Profile struct {
 	Name   string `json:"name"`
 	Active bool   `json:"active"`
+	Mode   string `json:"mode"` // "ap" / "sta"（802-11-wireless.mode，空值按 sta 理解）
 }
 
 // Status 是当前 Wi-Fi 连接状态。
 type Status struct {
-	SSID   string `json:"ssid"`
-	Signal int    `json:"signal"`
+	Mode   string `json:"mode"`   // ModeAP / ModeSTA / ""（wlan0 无活跃 Wi-Fi 连接）
+	SSID   string `json:"ssid"`   // AP 模式 = 热点 SSID；STA = 上游 SSID
+	Signal int    `json:"signal"` // 仅 STA 有意义；AP 模式恒为 0
 	IP     string `json:"ip"`
 }
 
@@ -152,25 +160,93 @@ func (c *Client) Scan() ([]Network, error) {
 	return c.scanLines()
 }
 
-// Status 返回当前连接。未连接任何 Wi-Fi 时 SSID 为空。
+// Status 返回当前连接。未连接任何 Wi-Fi 时 Mode/SSID 为空。
+//
+// 不走扫描：AP 模式下 wcn36xx 扫描只能看到自己的 beacon（实测），
+// 所以直接问 NM 哪个 profile 活跃、它是什么模式。
 func (c *Client) Status() (Status, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	st := Status{}
-	list, err := c.scanLines()
-	if err != nil {
+	name, mode, ssid, err := c.activeLocked()
+	if err != nil || name == "" {
 		return st, err
 	}
-	for _, n := range list {
-		if n.Active {
-			st.SSID, st.Signal = n.SSID, n.Signal
-			break
+	st.Mode, st.SSID = mode, ssid
+	st.IP = c.ifaceIPv4()
+	if mode == ModeSTA {
+		// 信号强度只有客户端模式有：从 NM 的扫描缓存里找活跃 SSID
+		list, err := c.scanLines()
+		if err == nil {
+			for _, n := range list {
+				if n.Active && n.SSID == st.SSID {
+					st.Signal = n.Signal
+					break
+				}
+			}
 		}
 	}
 	return st, nil
 }
 
-// Saved 返回已保存的 Wi-Fi profile 列表。
+// normMode 把 NM 的 mode 值规范化为 ModeSTA/ModeAP。
+// NM 里客户端模式叫 infrastructure（且常为空缺省值）。
+func normMode(m string) string {
+	m = strings.TrimSpace(m)
+	if m == ModeAP {
+		return ModeAP
+	}
+	return ModeSTA
+}
+
+// connMode 返回 profile 的模式（nmcli -g 直接吐值，无需解析字段名）。
+func (c *Client) connMode(profile string) string {
+	m, err := c.run("-g", "802-11-wireless.mode", "connection", "show", profile)
+	if err != nil {
+		return ModeSTA
+	}
+	return normMode(m)
+}
+
+// activeLocked 返回 wlan0 上活跃 Wi-Fi 连接的 profile 名、模式与 SSID。
+// 注意 profile 名和 SSID 是两回事（热点 profile 叫 "WIFI"、SSID 是 4G-WIFI），
+// 展示一律用 SSID 字段。
+func (c *Client) activeLocked() (name, mode, ssid string, err error) {
+	out, err := c.run("-g", "GENERAL.CONNECTION", "dev", "show", c.iface)
+	if err != nil {
+		return "", "", "", err
+	}
+	line := strings.TrimSpace(out)
+	if line == "" || line == "--" {
+		return "", "", "", nil
+	}
+	// 活跃的不是 Wi-Fi profile（usb0/modem 等）时，这两条会报错，按无 Wi-Fi 处理
+	modeOut, err := c.run("-g", "802-11-wireless.mode", "connection", "show", line)
+	if err != nil {
+		return "", "", "", nil
+	}
+	ssidOut, err := c.run("-g", "802-11-wireless.ssid", "connection", "show", line)
+	if err != nil {
+		return "", "", "", nil
+	}
+	return line, normMode(modeOut), strings.TrimSpace(ssidOut), nil
+}
+
+// ifaceIPv4 读 wlan0 的 IPv4 地址（Status 的 IP 字段）。
+func (c *Client) ifaceIPv4() string {
+	out, err := c.run("-g", "IP4.ADDRESS", "dev", "show", c.iface)
+	if err != nil {
+		return ""
+	}
+	// 可能多地址，取第一个（形如 192.168.10.208/24）
+	line := strings.TrimSpace(out)
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	return strings.TrimSpace(line)
+}
+
+// Saved 返回已保存的 Wi-Fi profile 列表（含模式）。
 func (c *Client) Saved() ([]Profile, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -184,7 +260,8 @@ func (c *Client) Saved() ([]Profile, error) {
 		if len(f) < 3 || f[1] != "802-11-wireless" {
 			continue
 		}
-		list = append(list, Profile{Name: f[0], Active: f[2] == c.iface})
+		p := Profile{Name: f[0], Active: f[2] == c.iface, Mode: c.connMode(f[0])}
+		list = append(list, p)
 	}
 	return list, nil
 }
@@ -265,3 +342,154 @@ func (c *Client) Forget(name string) error {
 	_, err = c.run("connection", "delete", name)
 	return err
 }
+
+// ---- 模式切换（AP / 客户端） ----
+//
+// 单 wlan0 只能一种模式，切换 = "谁持有 autoconnect"：
+// 目标模式的 profile 设 autoconnect yes、其余 no。这样 NM 重启/设备重启后
+// 会自动进到用户最后选择的模式，无需额外状态文件。
+//
+// 防失联：切换必然断开当前管理路径（切 AP 断家里网络、切 STA 断热点），
+// 但 LTE 侧 wwan0 不受影响，smsrelay 的短信业务不中断；切换失败时
+// 原 profile 的 autoconnect 语义仍在，NM 会自动回连。
+
+// apProfileLocked 返回第一个 mode=ap 的 profile 名；没有则返回 ""。
+func (c *Client) apProfileLocked() (string, error) {
+	out, err := c.run("-t", "-f", "NAME,TYPE", "connection", "show")
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		f := splitTerse(strings.TrimSpace(line))
+		if len(f) < 2 || f[1] != "802-11-wireless" {
+			continue
+		}
+		if c.connMode(f[0]) == ModeAP {
+			return f[0], nil
+		}
+	}
+	return "", nil
+}
+
+// SetAP 切到热点模式。ssid/password/channel 为空时沿用现有 AP profile 的值。
+func (c *Client) SetAP(ssid, password string, channel int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	prof, err := c.apProfileLocked()
+	if err != nil {
+		return err
+	}
+	if prof == "" {
+		// 没有现成热点 profile，新建（ipv4 shared = NAT + DHCP，客户端可直接上网）
+		prof = "WIFI"
+		args := []string{"connection", "add", "type", "wifi", "ifname", c.iface,
+			"con-name", prof,
+			"802-11-wireless.mode", ModeAP,
+			"802-11-wireless.band", "bg",
+			"ipv4.method", "shared"}
+		if ssid != "" {
+			args = append(args, "802-11-wireless.ssid", ssid)
+		}
+		if password != "" {
+			args = append(args, "802-11-wireless-security.key-mgmt", "wpa-psk",
+				"802-11-wireless-security.psk", password)
+		}
+		if channel > 0 {
+			args = append(args, "802-11-wireless.channel", strconv.Itoa(channel))
+		}
+		if _, err := c.run(args...); err != nil {
+			return fmt.Errorf("创建热点配置失败: %w", err)
+		}
+	} else {
+		// 已有热点 profile：按参数更新（留空沿用原值）
+		if ssid != "" {
+			_, err = c.run("connection", "modify", prof, "802-11-wireless.ssid", ssid)
+		}
+		if err == nil && password != "" {
+			_, err = c.run("connection", "modify", prof,
+				"802-11-wireless-security.key-mgmt", "wpa-psk",
+				"802-11-wireless-security.psk", password)
+		}
+		if err == nil && channel > 0 {
+			_, err = c.run("connection", "modify", prof, "802-11-wireless.channel", strconv.Itoa(channel))
+		}
+		if err != nil {
+			return fmt.Errorf("更新热点配置失败: %w", err)
+		}
+	}
+
+	// autoconnect 归属：AP yes，STA 全部 no
+	if err := c.setAutoconnectLocked(ModeAP); err != nil {
+		return err
+	}
+
+	// 断开当前连接再拉起热点（dev disconnect 保证 STA/Wi-Fi 路径干净退出）
+	_, _ = c.run("dev", "disconnect", c.iface)
+	time.Sleep(time.Second)
+	if _, err := c.run("connection", "up", prof); err != nil {
+		return fmt.Errorf("热点启动失败: %w", err)
+	}
+	return nil
+}
+
+// SetSTA 切回客户端模式。优先回连最近保存的客户端网络；
+// 一个都没保存时返回 ErrNoSTA，由前端引导用户去扫描连接。
+func (c *Client) SetSTA() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := c.setAutoconnectLocked(ModeSTA); err != nil {
+		return err
+	}
+
+	// 断开热点
+	_, _ = c.run("dev", "disconnect", c.iface)
+	time.Sleep(time.Second)
+
+	// 回连第一个（也是唯一场景下的）客户端 profile
+	out, err := c.run("-t", "-f", "NAME,TYPE", "connection", "show")
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		f := splitTerse(strings.TrimSpace(line))
+		if len(f) < 2 || f[1] != "802-11-wireless" {
+			continue
+		}
+		if c.connMode(f[0]) == ModeAP {
+			continue
+		}
+		if _, err := c.run("connection", "up", f[0]); err != nil {
+			// 这个网络连不上（信号没了/密码变了），试下一个
+			continue
+		}
+		return nil
+	}
+	return ErrNoSTA
+}
+
+// ErrNoSTA 切回客户端模式时没有任何可用的已保存网络。
+var ErrNoSTA = errors.New("没有已保存的客户端 Wi-Fi，请在扫描列表中选择网络连接")
+
+// setAutoconnectLocked 把目标模式的 profile 设为 autoconnect yes、其余 no。
+func (c *Client) setAutoconnectLocked(target string) error {
+	out, err := c.run("-t", "-f", "NAME,TYPE", "connection", "show")
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		f := splitTerse(strings.TrimSpace(line))
+		if len(f) < 2 || f[1] != "802-11-wireless" {
+			continue
+		}
+		mode := c.connMode(f[0])
+		want := "no"
+		if mode == target {
+			want = "yes"
+		}
+		_, _ = c.run("connection", "modify", f[0], "connection.autoconnect", want)
+	}
+	return nil
+}
+
