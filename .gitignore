@@ -14,3 +14,4 @@ config.json
 .vscode/
 *.swp
 .DS_Store
+openwrt/files/usr/bin/smsrelay
