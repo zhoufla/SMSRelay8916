@@ -1,0 +1,66 @@
+#!/bin/sh
+# LTE 保活 + 断网自愈（OpenWrt / netifd 版）
+#
+# 为什么需要保活：本机 2015 年 MPSS 固件在 LTE 空闲态（ECM-IDLE）收不到网络
+# 寻呼，短信会延迟几分钟。周期发一个 ICMP 包让链路保持连接态，代价约 0.5MB/天。
+#
+# 自愈：连续 FAIL_LIMIT 次 ping 失败（或 wwan0 没有 IPv4）→ 重拨。
+# 重拨走 netifd（ifdown/ifup modem），不直接碰 /dev/wwan0atN
+# （ModemManager 在用，抢了会话短信就丢）。
+# 两次恢复尝试至少间隔 RECOVER_COOLDOWN 秒。
+
+IFACE=wwan0
+NETIF=modem
+TARGET=223.5.5.5
+INTERVAL=10
+FAIL_LIMIT=3
+RECOVER_COOLDOWN=300
+
+fails=0
+last_recover=0
+
+log() { logger -t smsrelay-keepalive "$@"; }
+
+has_ip() { ip -4 addr show "$IFACE" 2>/dev/null | grep -q inet; }
+
+recover() {
+	now=$(date +%s)
+	if [ $((now - last_recover)) -lt "$RECOVER_COOLDOWN" ]; then
+		return 1
+	fi
+	last_recover=$now
+	if has_ip; then
+		log "WARN 连续 $fails 次 ping 不通，强制重拨 LTE"
+	else
+		log "WARN $IFACE 无 IPv4（连续 $fails 次），重拨 LTE"
+	fi
+	ifdown "$NETIF" 2>/dev/null
+	sleep 3
+	ifup "$NETIF" 2>/dev/null
+	sleep 20
+	if ping -I "$IFACE" -c 1 -W 5 -q "$TARGET" >/dev/null 2>&1; then
+		log "LTE 已恢复（重拨成功）"
+		return 0
+	fi
+	log "WARN 重拨后仍不通，${RECOVER_COOLDOWN}s 后自动再试"
+	return 1
+}
+
+log "keepalive 启动：iface=$IFACE netif=$NETIF interval=${INTERVAL}s"
+while true; do
+	if has_ip; then
+		if ping -I "$IFACE" -c 1 -W 3 -q "$TARGET" >/dev/null 2>&1; then
+			if [ "$fails" -ge "$FAIL_LIMIT" ]; then
+				log "LTE 恢复正常（此前连续失败 $fails 次）"
+			fi
+			fails=0
+		else
+			fails=$((fails + 1))
+			[ "$fails" -ge "$FAIL_LIMIT" ] && recover
+		fi
+	else
+		fails=$((fails + 1))
+		[ "$fails" -ge "$FAIL_LIMIT" ] && recover
+	fi
+	sleep "$INTERVAL"
+done

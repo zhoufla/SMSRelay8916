@@ -1,0 +1,15 @@
+{
+  "luci-app-smsrelay": {
+    "description": "Grant access to the SMS Relay gateway page",
+    "read": {
+      "ubus": {
+        "service": [ "list" ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "rc": [ "init" ]
+      }
+    }
+  }
+}

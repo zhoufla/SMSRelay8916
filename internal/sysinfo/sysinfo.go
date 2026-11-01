@@ -345,6 +345,12 @@ func readMem() Mem {
 }
 
 // readTemp 读所有 hwmon 传感器。毫摄氏度 → 摄氏度。
+//
+// hwmon 路径依赖内核把 tsens 注册成 hwmon 设备（该支持 5.19 才合入 mainline，
+// jz02v10 的 6.17 内核有）。5.15 一类的老内核只有 thermal class
+// （/sys/class/thermal/thermal_zone*，如 SP970 的 cpu0-1-thermal / modem-thermal），
+// 所以 hwmon 什么都没读到时，回退扫 thermal class，用 zone type 当传感器名。
+// 两个来源不会同时生效，不会重复计数。
 func readTemp() Temp {
 	var t Temp
 	paths, _ := filepath.Glob("/sys/class/hwmon/hwmon*/temp1_input")
@@ -372,6 +378,35 @@ func readTemp() Temp {
 			t.GPUC = c
 		case strings.Contains(name, "pm8916") || strings.Contains(name, "pmic"):
 			t.PMICC = c
+		}
+	}
+	if len(t.Sensors) == 0 {
+		paths, _ = filepath.Glob("/sys/class/thermal/thermal_zone*/temp")
+		for _, p := range paths {
+			dir := filepath.Dir(p)
+			name := strings.TrimSpace(readStringFile(filepath.Join(dir, "type")))
+			if name == "" {
+				name = filepath.Base(dir)
+			}
+			raw := readIntFile(p)
+			if raw == 0 {
+				continue
+			}
+			c := round1(float64(raw) / 1000.0)
+			t.Sensors = append(t.Sensors, Sensor{Name: name, C: c})
+			if c > t.MaxC {
+				t.MaxC = c
+			}
+			switch {
+			case strings.Contains(name, "cpu"):
+				if c > t.CPUC || t.CPUC == 0 {
+					t.CPUC = c
+				}
+			case strings.Contains(name, "gpu"):
+				t.GPUC = c
+			case strings.Contains(name, "pm8916") || strings.Contains(name, "pmic"):
+				t.PMICC = c
+			}
 		}
 	}
 	return t

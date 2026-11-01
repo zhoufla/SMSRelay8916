@@ -1,0 +1,13 @@
+{
+  "admin/services/smsrelay": {
+    "title": "短信网关",
+    "order": 60,
+    "action": {
+      "type": "view",
+      "path": "smsrelay/index"
+    },
+    "depends": {
+      "acl": [ "luci-app-smsrelay" ]
+    }
+  }
+}

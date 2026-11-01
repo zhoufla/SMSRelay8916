@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -39,7 +40,6 @@ import (
 	"github.com/zhoufla/SMSRelay8916/internal/otp"
 	"github.com/zhoufla/SMSRelay8916/internal/store"
 	"github.com/zhoufla/SMSRelay8916/internal/sysinfo"
-	"github.com/zhoufla/SMSRelay8916/internal/wifi"
 )
 
 // Version 是构建版本，编译时可通过 -ldflags "-X main.Version=..." 覆盖。
@@ -99,11 +99,28 @@ type Config struct {
 	DingTalk      DingTalkConfig `json:"dingtalk"`
 }
 
+// detectNetIfaces 返回要统计流量的网卡。
+// OpenWrt(netifd) 的 STA 接口名是 phy0-sta0，Debian(NetworkManager) 是 wlan0；
+// 按存在性探测，两边都能跑，缺哪个就跳过。
+func detectNetIfaces() []string {
+	cands := []string{"phy0-sta0", "wlan0", "wwan0"}
+	out := make([]string, 0, len(cands))
+	for _, n := range cands {
+		if _, err := net.InterfaceByName(n); err == nil {
+			out = append(out, n)
+		}
+	}
+	if len(out) == 0 {
+		out = []string{"wwan0"}
+	}
+	return out
+}
+
 func defaultConfig() *Config {
 	return &Config{
 		ListenHost:    "0.0.0.0",
 		ListenPort:    8088,
-		DBPath:        "/var/lib/smsrelay/sms.db",
+		DBPath:        "/etc/smsrelay/sms.db",
 		GuardInterval: 60,
 		ModemIndex:    "0",
 		WebDir:        "/opt/smsrelay/web",
@@ -154,7 +171,7 @@ func applyDefaults(cfg *Config) {
 		cfg.ListenPort = 8088
 	}
 	if cfg.DBPath == "" {
-		cfg.DBPath = "/var/lib/smsrelay/sms.db"
+		cfg.DBPath = "/etc/smsrelay/sms.db"
 	}
 	if cfg.GuardInterval <= 0 {
 		cfg.GuardInterval = 60
@@ -186,7 +203,6 @@ type App struct {
 	sys      *sysinfo.Collector
 	bus      *eventbus.Bus
 	logs     *logbuf.Buffer // 运行日志环形缓冲，供 /api/logs 查看
-	wifi     *wifi.Client   // Wi-Fi 管理（nmcli 封装）
 	startTS  time.Time
 	hostname string
 
@@ -249,10 +265,9 @@ func main() {
 		cfgPath:  usedPath,
 		store:    st,
 		modem:    modem.New(cfg.ModemIndex),
-		sys:      sysinfo.New("wlan0", "wwan0"),
+		sys:      sysinfo.New(detectNetIfaces()...),
 		bus:      bus,
 		logs:     ring,
-		wifi:     wifi.New("wlan0"),
 		startTS:  time.Now(),
 		hostname: hostname,
 		events:   make(chan string, 512),
@@ -1130,57 +1145,6 @@ func (a *App) CleanupNow() (int64, error) {
 // Logs 返回内存环形缓冲里的运行日志。
 func (a *App) Logs(limit int, level string) []logbuf.Entry {
 	return a.logs.Snapshot(limit, level)
-}
-
-// ---- Wi-Fi 管理（nmcli 封装，见 internal/wifi）----
-
-// WifiStatus 当前连接 + wlan0 的 IPv4 地址。
-func (a *App) WifiStatus() (wifi.Status, error) {
-	st, err := a.wifi.Status()
-	if err != nil {
-		return st, err
-	}
-	st.IP = sysinfo.IfaceIPv4("wlan0")
-	return st, nil
-}
-
-func (a *App) WifiScan() ([]wifi.Network, error)  { return a.wifi.Scan() }
-func (a *App) WifiSaved() ([]wifi.Profile, error) { return a.wifi.Saved() }
-
-func (a *App) WifiConnect(ssid, password string) error {
-	if err := a.wifi.Connect(ssid, password); err != nil {
-		return err
-	}
-	log.Printf("Wi-Fi 已连接: %s", ssid)
-	return nil
-}
-
-func (a *App) WifiForget(name string) error {
-	if err := a.wifi.Forget(name); err != nil {
-		return err
-	}
-	log.Printf("Wi-Fi 配置已删除: %s", name)
-	return nil
-}
-
-// WifiSetAP 切到热点模式（ipv4 shared，连入终端可经 NAT 上网）。
-func (a *App) WifiSetAP(ssid, password string, channel int) error {
-	if err := a.wifi.SetAP(ssid, password, channel); err != nil {
-		log.Printf("Wi-Fi 热点切换失败: %v", err)
-		return err
-	}
-	log.Printf("Wi-Fi 已切到热点模式")
-	return nil
-}
-
-// WifiSetSTA 切回客户端模式并回连已保存的网络。
-func (a *App) WifiSetSTA() error {
-	if err := a.wifi.SetSTA(); err != nil {
-		log.Printf("Wi-Fi 切回客户端失败: %v", err)
-		return err
-	}
-	log.Printf("Wi-Fi 已切到客户端模式")
-	return nil
 }
 
 // retentionLoop 周期清理超过保留天数的归档记录。
