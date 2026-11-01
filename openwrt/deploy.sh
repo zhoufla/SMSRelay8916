@@ -1,8 +1,8 @@
 #!/bin/sh
 # SMSRelay8916 → OpenWrt 设备部署脚本（在构建机上跑）
 #
-# 用法: ./openwrt/deploy.sh [设备IP] [SSH密码]
-#   默认 192.168.68.1 / 123456
+# 用法: ./openwrt/deploy.sh <设备IP> [SSH密码]
+#   SSH 密码也可用环境变量 SMSRELAY_SSH_PASS 传入（避免出现在 shell 历史）
 #
 # 做的事：
 #   1. 交叉编译 arm64 静态二进制（CGO_ENABLED=0，musl 直接跑）
@@ -10,8 +10,9 @@
 #   3. 远端启用并启动服务
 set -e
 
-HOST=${1:-192.168.68.1}
-PASS=${2:-123456}
+HOST=${1:?"usage: deploy.sh <device-ip> [ssh-password]"}
+PASS=${2:-${SMSRELAY_SSH_PASS:-}}
+[ -n "$PASS" ] || { echo "need ssh password (arg2 or SMSRELAY_SSH_PASS env)"; exit 1; }
 DIR=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$DIR/.." && pwd)
 
