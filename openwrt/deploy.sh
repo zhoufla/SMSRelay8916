@@ -6,8 +6,12 @@
 #
 # 做的事：
 #   1. 交叉编译 arm64 静态二进制（CGO_ENABLED=0，musl 直接跑）
-#   2. scp 二进制 + keepalive + init + LuCI 菜单到设备
+#   2. scp 二进制 + keepalive + init + UCI + LuCI 菜单到设备
 #   3. 远端启用并启动服务
+#
+# 注意：正式部署建议走 OpenWrt 包（openwrt/Makefile → ipk），本脚本是
+# 不重刷固件的快速迭代通道。UCI 配置只在设备上还不存在时推送，
+# 不覆盖已改过的配置；init.d 每次启动从 UCI 渲染 config.json。
 set -e
 
 HOST=${1:?"usage: deploy.sh <device-ip> [ssh-password]"}
@@ -32,6 +36,9 @@ echo "== 上传 =="
 $SCP "$DIR/files/usr/bin/smsrelay" root@$HOST:/usr/bin/smsrelay
 $SCP "$DIR/files/usr/bin/smsrelay-keepalive" root@$HOST:/usr/bin/smsrelay-keepalive
 $SCP "$DIR/files/etc/init.d/smsrelay" root@$HOST:/etc/init.d/smsrelay
+# UCI 启动配置：只在设备上还不存在时推送，避免覆盖已改过的配置
+$SSH root@$HOST "[ -f /etc/config/smsrelay ]" || \
+	$SCP "$DIR/files/etc/config/smsrelay" root@$HOST:/etc/config/smsrelay
 $SCP "$DIR/files/usr/share/luci/menu.d/luci-app-smsrelay.json" root@$HOST:/usr/share/luci/menu.d/
 $SCP "$DIR/files/usr/share/rpcd/acl.d/luci-app-smsrelay.json" root@$HOST:/usr/share/rpcd/acl.d/
 $SSH root@$HOST "mkdir -p /www/luci-static/resources/view/smsrelay"

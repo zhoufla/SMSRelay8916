@@ -1,0 +1,27 @@
+# smsrelay —— jz02v10 短信网关的启动配置（UCI）
+#
+# /etc/init.d/smsrelay 每次启动都会把这里渲染成 /etc/smsrelay/config.json
+# 再传给程序，所以手改 config.json 会在重启后丢失，要改请改这里。
+# 例外：Web 界面里设置的 api_token 会被自动保留（本文件 api_token 留空时）。
+# 通道、DDNS、保留天数等运行期配置不在这里——那些在 Web 设置页里改，存于应用自己的数据库。
+
+config main 'main'
+	# 服务开关（0 时 start 不拉起任何实例）
+	option enabled '1'
+	# LTE 保活实例：周期 ICMP 防 ECM-IDLE 空闲态收不到寻呼导致短信延迟。
+	# 注意 OpenWrt 下无 nmcli，脚本里的断网重拨不可用，保活部分正常。
+	option keepalive '1'
+	# Web/API 监听地址与端口
+	option listen_host '0.0.0.0'
+	option listen_port '8088'
+	# 访问口令：留空 = 不鉴权；推荐用 Web 设置页设置（重启后仍保留）。
+	# 若在此填写，Web 设置页设置的值将以这里为准。
+	option api_token ''
+	# 归档库位置（/var 是 tmpfs，重启即丢，别放那里）
+	option db_path '/etc/smsrelay/sms.db'
+	# 兜底扫描间隔秒：漏掉 D-Bus 信号时最坏恢复时间
+	option guard_interval '60'
+	# ModemManager 的 modem 编号
+	option modem_index '0'
+	# 本机号码（留空跟随 SIM 卡；Web 设置页设置的值优先级更高）
+	option own_number ''
