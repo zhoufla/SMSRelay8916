@@ -175,7 +175,7 @@ config ddns 'd_home'
 | 组件 | 仓库文件 | 设备路径 | 作用 |
 |---|---|---|---|
 | 主程序 | `cmd/`（编译产物） | `/opt/smsrelay/smsrelay` | 收信 / 归档 / 转发 / HTTP |
-| LTE 保活+自愈 | `scripts/smsrelay-keepalive.sh`<br>`deploy/smsrelay-keepalive.service` | `/usr/local/bin/smsrelay-keepalive.sh` | 每 10 秒一个 ICMP 避免空闲态丢寻呼；连续 3 次不通自动 `nmcli con up modem` 重拨（5 分钟冷却），全程不碰 AT 口 |
+| LTE 保活+自愈 | `openwrt/files/usr/bin/smsrelay-keepalive` | `/usr/bin/smsrelay-keepalive` | 每 10 秒一个 ICMP 避免空闲态丢寻呼；连续 3 次不通走 `ifdown/ifup modem` 重拨（5 分钟冷却）；基带未就绪时静默等待、不计失败次数，全程不碰 AT 口 |
 | 每日清理 | `scripts/smsrelay-maint.sh`<br>`deploy/smsrelay-maint.service`<br>`deploy/smsrelay-maint.timer` | `/usr/local/bin/smsrelay-maint.sh` | 每天 04:10 停 MM 独占 AT 口，清掉孤儿短信分片（纯 shell，不依赖 python3） |
 | 命令行 | `scripts/sms` | `/usr/local/bin/sms` | 只依赖 `curl` + `jq` |
 
@@ -382,7 +382,7 @@ ModemManager 自己就是用 `wwan0at1` 下发 `AT+CMGR` 把 `+CMTI` 通知变�
 
 这台 MSM8916 + 2015 年 MPSS 固件在 LTE 空闲态（ECM-IDLE）下收不到网络寻呼。别人随机时间发来的短信可能延迟几分钟，直到设备因其它原因重新附着才补投。
 
-`AT+CREG: 0,1` 显示 CS 域已注册，但空闲寻呼实际打不到，属固件/网络侧行为，软件改不动根因，只能缓解：`smsrelay-keepalive.service` 每 10 秒 ping 一次，维持连接活跃（约 0.5 MB/天）。
+`AT+CREG: 0,1` 显示 CS 域已注册，但空闲寻呼实际打不到，属固件/网络侧行为，软件改不动根因，只能缓解：`smsrelay-keepalive`（procd 的 keepalive 实例）每 10 秒 ping 一次，维持连接活跃（约 0.5 MB/天）。
 
 `/api/status` 的 `paging_24h` 字段用于观察缓解效果：`slow_count`（延迟 > 60s 的条数）应为 0。
 

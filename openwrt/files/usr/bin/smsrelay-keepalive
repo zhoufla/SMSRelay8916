@@ -8,6 +8,13 @@
 # 重拨走 netifd（ifdown/ifup modem），不直接碰 /dev/wwan0atN
 # （ModemManager 在用，抢了会话短信就丢）。
 # 两次恢复尝试至少间隔 RECOVER_COOLDOWN 秒。
+#
+# 基带等待（jz02v10）：MPSS 开机后会连续 watchdog 复位，每次起来空等 40.05 秒
+# 被看门狗咬掉，通常 4 轮、约 3 分半才稳定。这期间 mmcli 看不到 modem、
+# wwan0 连 QMI 端口都没有，此时 ifdown/ifup 是空转 —— netifd 没有 modem 可拨，
+# 只会刷一串 WARN 并把恢复冷却白白推后。所以把「基带在不在」和「链路通不通」
+# 分开判断：没有 modem 就静默等待、不计失败次数；基带一出现再给 GRACE 秒
+# 宽限，让它自己完成附着，避免刚 attach 就被我们重拨打断。
 
 IFACE=wwan0
 NETIF=modem
@@ -15,13 +22,25 @@ TARGET=223.5.5.5
 INTERVAL=10
 FAIL_LIMIT=3
 RECOVER_COOLDOWN=300
+GRACE=30
 
 fails=0
 last_recover=0
+waiting=0
+grace_until=0
 
 log() { logger -t smsrelay-keepalive "$@"; }
 
-has_ip() { ip -4 addr show "$IFACE" 2>/dev/null | grep -q inet; }
+has_ip() { ip -4 addr show "$IFACE" 2>/dev/null | grep -q 'inet '; }
+
+# 基带是否已被 ModemManager 认到。没装 mmcli 时退化为看 QMI 端口节点。
+modem_present() {
+	if command -v mmcli >/dev/null 2>&1; then
+		mmcli -L 2>/dev/null | grep -q 'ModemManager1/Modem'
+	else
+		[ -e /dev/wwan0qmi0 ]
+	fi
+}
 
 recover() {
 	now=$(date +%s)
@@ -48,6 +67,24 @@ recover() {
 
 log "keepalive 启动：iface=$IFACE netif=$NETIF interval=${INTERVAL}s"
 while true; do
+	if ! modem_present; then
+		if [ "$waiting" = 0 ]; then
+			log "基带未就绪（MPSS 重启中），暂停保活，等 modem 出现"
+			waiting=1
+		fi
+		sleep "$INTERVAL"
+		continue
+	fi
+	if [ "$waiting" = 1 ]; then
+		log "基带已就绪，${GRACE}s 宽限后恢复保活"
+		waiting=0
+		fails=0
+		grace_until=$(( $(date +%s) + GRACE ))
+	fi
+	if [ "$(date +%s)" -lt "$grace_until" ]; then
+		sleep "$INTERVAL"
+		continue
+	fi
 	if has_ip; then
 		if ping -I "$IFACE" -c 1 -W 3 -q "$TARGET" >/dev/null 2>&1; then
 			if [ "$fails" -ge "$FAIL_LIMIT" ]; then
