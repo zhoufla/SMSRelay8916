@@ -1,15 +1,19 @@
 {
   "luci-app-smsrelay": {
-    "description": "Grant access to the SMS Relay gateway page",
+    "description": "访问短信网关的设置页与短信记录页",
     "read": {
       "ubus": {
-        "service": [ "list" ]
-      }
+        "service": [ "list" ],
+        "uci": [ "get", "state" ]
+      },
+      "uci": [ "smsrelay" ]
     },
     "write": {
       "ubus": {
-        "rc": [ "init" ]
-      }
+        "rc": [ "init" ],
+        "uci": [ "set", "add", "delete", "commit", "apply", "changes", "order", "rename" ]
+      },
+      "uci": [ "smsrelay" ]
     }
   }
 }

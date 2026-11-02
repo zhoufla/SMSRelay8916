@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/zhoufla/SMSRelay8916/internal/api"
+	"github.com/zhoufla/SMSRelay8916/internal/config"
 	"github.com/zhoufla/SMSRelay8916/internal/ddns"
 	"github.com/zhoufla/SMSRelay8916/internal/eventbus"
 	"github.com/zhoufla/SMSRelay8916/internal/forward"
@@ -77,27 +78,7 @@ var pendingStates = map[string]bool{
 	"":          true,
 }
 
-// DingTalkConfig 是钉钉转发配置。
-type DingTalkConfig struct {
-	Enabled   bool   `json:"enabled"`
-	URL       string `json:"url"`
-	Prefix    string `json:"prefix"`
-	MaxPerMin int    `json:"max_per_min"`
-}
-
-// Config 是运行配置。字段名与既有 Python 版保持一致，可直接复用旧配置文件。
-type Config struct {
-	ListenHost    string         `json:"listen_host"`
-	ListenPort    int            `json:"listen_port"`
-	APIToken      string         `json:"api_token"`
-	DBPath        string         `json:"db_path"`
-	PollInterval  int            `json:"poll_interval"`  // 兼容旧配置，Go 版不再使用
-	GuardInterval int            `json:"guard_interval"` // 兜底轮询秒数，默认 60
-	ModemIndex    string         `json:"modem_index"`
-	WebDir        string         `json:"web_dir"`
-	OwnNumber     string         `json:"own_number"`
-	DingTalk      DingTalkConfig `json:"dingtalk"`
-}
+// Config 由 internal/config 从 UCI 解析，这里不再保留第二份定义。
 
 // detectNetIfaces 返回要统计流量的网卡。
 // OpenWrt(netifd) 的 STA 接口名是 phy0-sta0，Debian(NetworkManager) 是 wlan0；
@@ -116,74 +97,6 @@ func detectNetIfaces() []string {
 	return out
 }
 
-func defaultConfig() *Config {
-	return &Config{
-		ListenHost:    "0.0.0.0",
-		ListenPort:    8088,
-		DBPath:        "/etc/smsrelay/sms.db",
-		GuardInterval: 60,
-		ModemIndex:    "0",
-		WebDir:        "/opt/smsrelay/web",
-	}
-}
-
-// loadConfig 读取配置。查找顺序：
-//  1. -config 参数
-//  2. 环境变量 SMSRELAY_CONFIG
-//  3. /etc/smsrelay/config.json
-//  4. /etc/sms-gw/config.json（兼容早期 Python 版）
-func loadConfig(explicit string) (*Config, string, error) {
-	candidates := []string{}
-	if explicit != "" {
-		candidates = append(candidates, explicit)
-	}
-	if p := os.Getenv("SMSRELAY_CONFIG"); p != "" {
-		candidates = append(candidates, p)
-	}
-	candidates = append(candidates,
-		"/etc/smsrelay/config.json",
-		"/etc/sms-gw/config.json",
-	)
-
-	for _, p := range candidates {
-		raw, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		cfg := defaultConfig()
-		if err := json.Unmarshal(raw, cfg); err != nil {
-			return nil, p, fmt.Errorf("解析配置 %s 失败: %w", p, err)
-		}
-		applyDefaults(cfg)
-		return cfg, p, nil
-	}
-
-	cfg := defaultConfig()
-	applyDefaults(cfg)
-	return cfg, "", nil
-}
-
-func applyDefaults(cfg *Config) {
-	if cfg.ListenHost == "" {
-		cfg.ListenHost = "0.0.0.0"
-	}
-	if cfg.ListenPort == 0 {
-		cfg.ListenPort = 8088
-	}
-	if cfg.DBPath == "" {
-		cfg.DBPath = "/etc/smsrelay/sms.db"
-	}
-	if cfg.GuardInterval <= 0 {
-		cfg.GuardInterval = 60
-	}
-	if cfg.ModemIndex == "" {
-		cfg.ModemIndex = "0"
-	}
-	if cfg.DingTalk.MaxPerMin <= 0 {
-		cfg.DingTalk.MaxPerMin = 15
-	}
-}
-
 // smsState 记录一个 SMS 对象在本进程内的观察历史。
 type smsState struct {
 	firstSeen  time.Time // 首次看到该对象的时间，用于 pending 超时兜底
@@ -193,9 +106,12 @@ type smsState struct {
 }
 
 // App 把各组件装配在一起，并实现 api.Backend。
+//
+// 配置（含通道、DDNS）全部来自 UCI，进程内只读：改配置走 LuCI，
+// uci commit 触发 procd reload，服务重启后读到新值。程序不写配置，
+// 所以不存在"两个写入口互相覆盖"的问题。
 type App struct {
-	cfg      *Config
-	cfgPath  string
+	cfg      *config.Config
 	store    *store.Store
 	modem    *modem.Client
 	sender   *forward.Sender
@@ -211,22 +127,19 @@ type App struct {
 	mu     sync.Mutex // 保护 states
 	states map[string]*smsState
 
-	cfgMu sync.Mutex // 保护 cfg.APIToken 的读写与 config.json 回写
-
 	sendMu sync.Mutex // 发送串行化，避免多路并发挤爆 modem
 }
 
 func main() {
 	var (
-		configFlag = flag.String("config", "", "配置文件路径")
+		configFlag = flag.String("config", config.DefaultPath, "UCI 配置路径")
 		checkFlag  = flag.Bool("check", false, "仅校验配置与依赖，不启动服务")
 		printFlag  = flag.Bool("print-config", false, "打印生效的配置后退出")
 		versionFlg = flag.Bool("version", false, "打印版本")
 	)
 	flag.Parse()
 	log.SetFlags(log.LstdFlags)
-	// stderr 照常进 journald；内存环形缓冲给 Web 界面查看，容量固定自动淘汰，
-	// 持久化由 journal 负责，这里不需要额外的清理任务
+	// stderr 进 journald；内存环形缓冲给 Web 界面看，容量固定自动淘汰
 	ring := logbuf.New(500)
 	log.SetOutput(io.MultiWriter(os.Stderr, ring))
 
@@ -235,14 +148,13 @@ func main() {
 		return
 	}
 
-	cfg, usedPath, err := loadConfig(*configFlag)
+	cfg, err := config.Load(*configFlag)
 	if err != nil {
-		log.Fatalf("%v", err)
+		log.Fatalf("读取配置失败: %v", err)
 	}
-	if usedPath != "" {
-		log.Printf("配置文件: %s", usedPath)
-	} else {
-		log.Printf("未找到配置文件，使用内置默认值")
+	log.Printf("配置: %s（通道 %d 个、DDNS %d 条）", cfg.Source, len(cfg.Channels), len(cfg.DDNS))
+	for _, w := range cfg.Warnings {
+		log.Printf("WARN %s", w)
 	}
 
 	if *printFlag {
@@ -250,10 +162,22 @@ func main() {
 		fmt.Println(string(b))
 		return
 	}
+	if !cfg.Enabled {
+		log.Printf("UCI 里 enabled=0，服务不启动")
+		return
+	}
 
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
-		log.Fatalf("打开归档库失败: %v", err)
+		// 归档库是"可丢数据"：坏了就改名留证后重建，不让一个字节毁掉整个网关。
+		// 配置在 UCI 里，重建后照常工作，只是历史短信没了。
+		log.Printf("ERROR 归档库无法打开（%v），改名留证后重建", err)
+		if rerr := setAsideBrokenDB(cfg.DBPath); rerr != nil {
+			log.Fatalf("清理损坏的归档库失败: %v", rerr)
+		}
+		if st, err = store.Open(cfg.DBPath); err != nil {
+			log.Fatalf("重建归档库失败: %v", err)
+		}
 	}
 	defer st.Close()
 	log.Printf("归档库: %s", cfg.DBPath)
@@ -262,7 +186,6 @@ func main() {
 	bus := eventbus.New()
 	app := &App{
 		cfg:      cfg,
-		cfgPath:  usedPath,
 		store:    st,
 		modem:    modem.New(cfg.ModemIndex),
 		sys:      sysinfo.New(detectNetIfaces()...),
@@ -275,17 +198,21 @@ func main() {
 	}
 	app.sender = forward.NewSender()
 	app.cf = ddns.NewClient()
-	app.migrateLegacyDingTalk()
-	if chs, err := app.store.ListChannels(true); err == nil {
-		if len(chs) > 0 {
-			names := make([]string, 0, len(chs))
-			for _, ch := range chs {
-				names = append(names, ch.Name)
-			}
-			log.Printf("转发通道: %d 个已启用（%s）", len(chs), strings.Join(names, "、"))
-		} else {
-			log.Printf("转发通道: 未配置")
+
+	// 通道从 UCI 删掉后，库里按 channel_id 记的投递行就成了孤儿：
+	// 功能上无害，但会让"是否已全部转发"永远为假，启动时清一次。
+	if n, perr := st.PruneDeliveries(channelIDs(cfg.Channels)); perr == nil && n > 0 {
+		log.Printf("清理已删除通道的投递记录: %d 条", n)
+	}
+
+	if chs := cfg.EnabledChannels(); len(chs) > 0 {
+		names := make([]string, 0, len(chs))
+		for _, ch := range chs {
+			names = append(names, ch.Name)
 		}
+		log.Printf("转发通道: %d 个已启用（%s）", len(chs), strings.Join(names, "、"))
+	} else {
+		log.Printf("转发通道: 未配置")
 	}
 
 	if *checkFlag {
@@ -373,6 +300,7 @@ func main() {
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutCancel()
 	_ = srv.Shutdown(shutCtx)
+
 	log.Printf("已退出")
 }
 
@@ -846,34 +774,6 @@ func splitBody(body string) []string {
 // 转发
 // ---------------------------------------------------------------------------
 
-// migrateLegacyDingTalk 把旧 config.json 里的钉钉配置迁移成一条通道记录。
-//
-// 只在 channels 表为空时执行一次，之后以数据库（也就是界面上配的）为准，
-// 这样升级不需要手工重配。
-func (a *App) migrateLegacyDingTalk() {
-	n, err := a.store.ChannelCount()
-	if err != nil || n > 0 {
-		return
-	}
-	if strings.TrimSpace(a.cfg.DingTalk.URL) == "" {
-		return
-	}
-	ch := &forward.Channel{
-		Name:    "钉钉",
-		Type:    forward.TypeDingTalk,
-		Enabled: a.cfg.DingTalk.Enabled,
-		Config: forward.Config{
-			URL:    a.cfg.DingTalk.URL,
-			Prefix: a.cfg.DingTalk.Prefix,
-		},
-	}
-	if err := a.store.CreateChannel(ch); err != nil {
-		log.Printf("WARN 迁移钉钉配置失败: %v", err)
-		return
-	}
-	log.Printf("已把 config.json 的钉钉配置迁移为通道 #%d（之后以界面配置为准）", ch.ID)
-}
-
 // forwardLoop 是多通道转发循环。
 func (a *App) forwardLoop(ctx context.Context) {
 	ticker := time.NewTicker(3 * time.Second)
@@ -897,8 +797,8 @@ func (a *App) forwardBatch(ctx context.Context) {
 	if err != nil || len(msgs) == 0 {
 		return
 	}
-	channels, err := a.store.ListChannels(true)
-	if err != nil || len(channels) == 0 {
+	channels := a.cfg.EnabledChannels()
+	if len(channels) == 0 {
 		return
 	}
 	own, _ := a.resolveOwnNumber(nil)
@@ -965,7 +865,7 @@ func (a *App) Status() api.StatusPayload {
 	today, _ := a.store.Today()
 	pg, _ := a.store.Paging24h()
 	own, src := a.resolveOwnNumber(st)
-	enabledChannels, _ := a.store.ListChannels(true)
+	enabledChannels := a.cfg.EnabledChannels()
 
 	return api.StatusPayload{
 		Modem:           st,
@@ -986,15 +886,10 @@ func (a *App) Status() api.StatusPayload {
 
 // resolveOwnNumber 解析本机号码，返回号码与来源。
 //
-// 优先级：界面手动设置 > config.json > SIM 卡 > 空。
+// 优先级：UCI own_number > SIM 卡 > 空。
 // SIM 里读不到号码是常态（很多卡不写 EF_MSISDN，本机这张就没有），
 // 所以必须允许手动兜底，否则转发内容里永远缺"收信号码"。
 func (a *App) resolveOwnNumber(st *modem.Status) (string, string) {
-	if v, ok, err := a.store.GetSetting("own_number"); err == nil && ok {
-		if v = strings.TrimSpace(v); v != "" {
-			return v, "manual"
-		}
-	}
 	if v := strings.TrimSpace(a.cfg.OwnNumber); v != "" {
 		return v, "config"
 	}
@@ -1011,66 +906,19 @@ func (a *App) System() interface{} {
 	return a.sys.Last()
 }
 
-// Settings 返回界面可修改的设置项。敏感字段已脱敏。
+// Settings 返回当前生效的设置项（只读，改配置请走 LuCI）。
 func (a *App) Settings() interface{} {
 	own, src := a.resolveOwnNumber(a.modem.Status())
-	values, _ := a.store.AllSettings()
-	if values == nil {
-		values = map[string]string{}
-	}
 	return api.SettingsPayload{
 		OwnNumber:       own,
 		OwnNumberSource: src,
-		Values:          values,
-		APITokenSet:     a.cfg.APIToken != "",
+		Values: map[string]string{
+			"own_number":  a.cfg.OwnNumber,
+			"retain_days": strconv.Itoa(a.cfg.RetainDays),
+		},
+		APITokenSet: a.cfg.APIToken != "",
+		ReadOnly:    true,
 	}
-}
-
-// UpdateSettings 更新设置项。目前支持 own_number 与 retain_days。
-func (a *App) UpdateSettings(kv map[string]string) error {
-	for k, v := range kv {
-		switch k {
-		case "own_number":
-			v = strings.TrimSpace(v)
-			if v == "" {
-				// 清空 = 回到「跟随 SIM / 配置文件」
-				if err := a.store.DeleteSetting("own_number"); err != nil {
-					return err
-				}
-			} else if err := a.store.SetSetting("own_number", v); err != nil {
-				return err
-			}
-		case "retain_days":
-			v = strings.TrimSpace(v)
-			if v == "" {
-				// 清空 = 回到默认（不清理）
-				if err := a.store.DeleteSetting("retain_days"); err != nil {
-					return err
-				}
-				break
-			}
-			days, err := strconv.Atoi(v)
-			if err != nil || days < 0 || days > 3650 {
-				return fmt.Errorf("保留天数必须是 0~3650 的整数（0 = 不自动清理）")
-			}
-			if err := a.store.SetSetting("retain_days", strconv.Itoa(days)); err != nil {
-				return err
-			}
-		case "api_token":
-			// 界面可直接设置/更换/清空接口口令。写 config.json 而不是 settings 表：
-			// CLI（scripts/sms）要靠读文件自动带鉴权头，且这是启动项语义。
-			v = strings.TrimSpace(v)
-			if v != "" && (len(v) < 6 || len(v) > 128) {
-				return fmt.Errorf("接口口令长度需在 6~128 之间（留空 = 关闭鉴权）")
-			}
-			if err := a.setAPIToken(v); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("不支持的设置项: %s", k)
-		}
-	}
-	return nil
 }
 
 // ListMessages 分页查询归档。
@@ -1081,10 +929,7 @@ func (a *App) ListMessages(q store.ListQuery) ([]store.Message, int, error) {
 // ForwardTest 向所有启用的通道各发一条测试消息。
 // 返回第一条失败的错误，方便定位是哪个通道配错了。
 func (a *App) ForwardTest() error {
-	chs, err := a.store.ListChannels(true)
-	if err != nil {
-		return err
-	}
+	chs := a.cfg.EnabledChannels()
 	if len(chs) == 0 {
 		return fmt.Errorf("没有启用的转发通道")
 	}
@@ -1120,24 +965,17 @@ func (a *App) DeleteMessages(ids []int64) (int64, error) {
 	return a.store.DeleteByIDs(ids)
 }
 
-// CleanupNow 按当前 retain_days 设置立即清一次过期记录。
-// 未设置或为 0 时不动作，返回 0 —— 与「立即清理」按钮的语义一致。
+// CleanupNow 按当前 retain_days 立即清一次过期记录。
+// 为 0 时不动作，返回 0 —— 与「立即清理」按钮的语义一致。
 func (a *App) CleanupNow() (int64, error) {
-	days, ok, err := a.store.GetSetting("retain_days")
-	if err != nil {
-		return 0, err
-	}
-	if !ok {
+	days := a.cfg.RetainDays
+	if days <= 0 {
 		return 0, nil
 	}
-	n, err := strconv.Atoi(days)
-	if err != nil || n <= 0 {
-		return 0, nil
-	}
-	cutoff := time.Now().AddDate(0, 0, -n).Format("2006-01-02")
+	cutoff := time.Now().AddDate(0, 0, -days).Format("2006-01-02")
 	deleted, err := a.store.DeleteOlderThan(cutoff)
 	if err == nil && deleted > 0 {
-		log.Printf("手动清理: 删除 %d 条过期记录（保留 %d 天）", deleted, n)
+		log.Printf("手动清理: 删除 %d 条过期记录（保留 %d 天）", deleted, days)
 	}
 	return deleted, err
 }
@@ -1166,16 +1004,8 @@ func (a *App) retentionLoop(ctx context.Context, iv time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			v, ok, err := a.store.GetSetting("retain_days")
-			if err != nil {
-				log.Printf("WARN 读取保留天数失败: %v", err)
-				continue
-			}
-			if !ok {
-				continue
-			}
-			days, err := strconv.Atoi(v)
-			if err != nil || days <= 0 {
+			days := a.cfg.RetainDays
+			if days <= 0 {
 				continue
 			}
 			cutoff := time.Now().AddDate(0, 0, -days).Format("2006-01-02")
@@ -1192,50 +1022,9 @@ func (a *App) retentionLoop(ctx context.Context, iv time.Duration) {
 }
 
 // Token 返回 API 访问口令，空表示不鉴权。
+// 口令来自 UCI api_token，进程内只读，不需要加锁。
 func (a *App) Token() string {
-	a.cfgMu.Lock()
-	defer a.cfgMu.Unlock()
 	return a.cfg.APIToken
-}
-
-// setAPIToken 更新接口口令：立即生效（Token() 读的就是这份 cfg），
-// 并原子回写 config.json —— 持久化与 CLI（scripts/sms 自动读文件带鉴权）都靠它。
-// v 为空表示关闭鉴权。写坏配置文件的风险用「临时文件 + rename」规避。
-func (a *App) setAPIToken(v string) error {
-	a.cfgMu.Lock()
-	defer a.cfgMu.Unlock()
-
-	path := a.cfgPath
-	if path == "" {
-		// 启动时没有任何配置文件（全默认值）。写口令就必须落一个文件。
-		path = "/etc/smsrelay/config.json"
-		a.cfgPath = path
-	}
-
-	tmp := path + ".tmp"
-	// 先改内存再落盘：marshal 的必须是新值，否则文件里永远是上一代口令
-	old := a.cfg.APIToken
-	a.cfg.APIToken = v
-	buf, err := json.MarshalIndent(a.cfg, "", "  ")
-	if err != nil {
-		a.cfg.APIToken = old
-		return err
-	}
-	if err := os.WriteFile(tmp, append(buf, '\n'), 0o600); err != nil {
-		a.cfg.APIToken = old
-		return fmt.Errorf("写入配置失败: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		a.cfg.APIToken = old
-		return fmt.Errorf("替换配置失败: %w", err)
-	}
-	if v == "" {
-		log.Printf("API 鉴权已关闭（api_token 清空）")
-	} else {
-		log.Printf("API 鉴权口令已更新并写入 %s", path)
-	}
-	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1244,56 +1033,20 @@ func (a *App) setAPIToken(v string) error {
 
 // ListChannels 返回所有通道，敏感字段已脱敏。
 //
+// 通道来自 UCI，改配置在 LuCI 里做；这里只提供只读视图。
 // 脱敏是必须的：URL 里带着 access_token，header 里可能带鉴权头。
-// 但脱敏后前端再提交回来时不能拿 **** 覆盖真值，所以 Update 时要做 merge。
 func (a *App) ListChannels() ([]forward.Channel, error) {
-	chs, err := a.store.ListChannels(false)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]forward.Channel, len(chs))
-	for i, ch := range chs {
+	out := make([]forward.Channel, 0, len(a.cfg.Channels))
+	for _, ch := range a.cfg.Channels {
 		ch.Config = forward.MaskSecret(ch.Config)
-		out[i] = ch
+		out = append(out, ch)
 	}
 	return out, nil
 }
 
-// CreateChannel 新建通道。
-func (a *App) CreateChannel(ch *forward.Channel) error {
-	if err := validateChannel(ch); err != nil {
-		return err
-	}
-	return a.store.CreateChannel(ch)
-}
-
-// UpdateChannel 更新通道。前端回传的脱敏占位会被替换成数据库里的原值。
-func (a *App) UpdateChannel(ch *forward.Channel) error {
-	old, err := a.store.GetChannel(ch.ID)
-	if err != nil {
-		return err
-	}
-	if old == nil {
-		return fmt.Errorf("通道不存在")
-	}
-	mergeMaskedConfig(&ch.Config, old.Config)
-	if err := validateChannel(ch); err != nil {
-		return err
-	}
-	return a.store.UpdateChannel(ch)
-}
-
-// DeleteChannel 删除通道。
-func (a *App) DeleteChannel(id int64) error {
-	return a.store.DeleteChannel(id)
-}
-
 // TestChannel 只测指定的那个通道，便于逐个排查配置。
 func (a *App) TestChannel(id int64) error {
-	ch, err := a.store.GetChannel(id)
-	if err != nil {
-		return err
-	}
+	ch := a.cfg.ChannelByID(id)
 	if ch == nil {
 		return fmt.Errorf("通道不存在")
 	}
@@ -1305,44 +1058,6 @@ func (a *App) TestChannel(id int64) error {
 		TS:        time.Now().Format("2006-01-02 15:04:05"),
 		Direction: "in",
 	})
-}
-
-func validateChannel(ch *forward.Channel) error {
-	ch.Name = strings.TrimSpace(ch.Name)
-	if ch.Name == "" {
-		return fmt.Errorf("名称必填")
-	}
-	switch ch.Type {
-	case forward.TypeDingTalk, forward.TypeWebhook:
-	default:
-		return fmt.Errorf("类型必须是 dingtalk 或 webhook")
-	}
-	u := strings.TrimSpace(ch.Config.URL)
-	if u == "" {
-		return fmt.Errorf("地址必填")
-	}
-	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-		return fmt.Errorf("地址必须以 http:// 或 https:// 开头")
-	}
-	ch.Config.URL = u
-	return nil
-}
-
-// mergeMaskedConfig 把脱敏占位换回数据库里的真实值。
-func mergeMaskedConfig(dst *forward.Config, old forward.Config) {
-	if strings.Contains(dst.URL, "****") {
-		dst.URL = old.URL
-	}
-	if forward.IsMasked(dst.Secret) {
-		dst.Secret = old.Secret
-	}
-	for k, v := range dst.Headers {
-		if forward.IsMasked(v) {
-			if ov, ok := old.Headers[k]; ok {
-				dst.Headers[k] = ov
-			}
-		}
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1372,42 +1087,41 @@ func (a *App) ddnsLoop(ctx context.Context, iv time.Duration) {
 }
 
 func (a *App) ddnsSyncAll() {
-	recs, err := a.store.ListDDNS()
-	if err != nil {
-		log.Printf("WARN 读取 DDNS 记录失败: %v", err)
-		return
-	}
-	for i := range recs {
-		if !recs[i].Enabled {
+	for i := range a.cfg.DDNS {
+		r := a.cfg.DDNS[i]
+		if !r.Enabled {
 			continue
 		}
-		a.syncDDNSRecord(&recs[i])
+		a.syncDDNSRecord(&r)
 	}
 }
 
 func (a *App) syncDDNSRecord(r *ddns.Record) {
+	// 上次解析到的地址属于运行态，从库里取（配置在 UCI，没有这个字段）
+	if st, err := a.store.GetDDNSState(r.ID); err == nil {
+		r.LastIP = st.LastIP
+	}
 	changed, ip, err := a.cf.Sync(r, "")
 	if err != nil {
-		_ = a.store.UpdateDDNSResult(r.ID, "", err.Error())
+		_ = a.store.SetDDNSState(r.ID, "", err.Error())
 		log.Printf("ddns %s (%s) 失败: %v", r.Name, r.Type, err)
 		return
 	}
+	_ = a.store.SetDDNSState(r.ID, ip, "")
 	if changed {
-		_ = a.store.UpdateDDNSResult(r.ID, ip, "")
 		log.Printf("ddns %s (%s) -> %s", r.Name, r.Type, ip)
-	} else if ip != r.LastIP {
-		// Cloudflare 上已经是这个地址（例如手动改过），同步一下本地记录
-		_ = a.store.UpdateDDNSResult(r.ID, ip, "")
 	}
 }
 
 // ListDDNS 返回所有记录，附带实时地址与可达性判断。
 func (a *App) ListDDNS() ([]ddns.Record, error) {
-	recs, err := a.store.ListDDNS()
-	if err != nil {
-		return nil, err
-	}
+	recs := make([]ddns.Record, len(a.cfg.DDNS))
+	copy(recs, a.cfg.DDNS)
+
 	for i := range recs {
+		if st, err := a.store.GetDDNSState(recs[i].ID); err == nil {
+			recs[i].LastIP, recs[i].LastUpdate, recs[i].LastError = st.LastIP, st.LastUpdate, st.LastError
+		}
 		// API token 脱敏
 		if t := recs[i].APIToken; t != "" {
 			if len(t) <= 4 {
@@ -1444,82 +1158,48 @@ func (a *App) ListDDNS() ([]ddns.Record, error) {
 	return recs, nil
 }
 
-// CreateDDNS 新建记录。
-func (a *App) CreateDDNS(r *ddns.Record) error {
-	if err := validateDDNS(r); err != nil {
-		return err
-	}
-	return a.store.CreateDDNS(r)
-}
-
-// UpdateDDNS 更新记录。token 回传脱敏值时保留库里的原值。
-func (a *App) UpdateDDNS(r *ddns.Record) error {
-	old, err := a.store.GetDDNS(r.ID)
-	if err != nil {
-		return err
-	}
-	if old == nil {
-		return fmt.Errorf("记录不存在")
-	}
-	if strings.HasPrefix(r.APIToken, "****") {
-		r.APIToken = old.APIToken
-	}
-	if err := validateDDNS(r); err != nil {
-		return err
-	}
-	return a.store.UpdateDDNS(r)
-}
-
-// DeleteDDNS 删除记录（只删本地配置，不动 Cloudflare 上的解析）。
-func (a *App) DeleteDDNS(id int64) error {
-	return a.store.DeleteDDNS(id)
-}
-
 // SyncDDNSNow 手动触发一次同步，便于配完立刻验证。
 func (a *App) SyncDDNSNow(id int64) (string, error) {
-	r, err := a.store.GetDDNS(id)
-	if err != nil {
-		return "", err
-	}
-	if r == nil {
+	rec := a.cfg.DDNSByID(id)
+	if rec == nil {
 		return "", fmt.Errorf("记录不存在")
 	}
-	changed, ip, serr := a.cf.Sync(r, "")
+	r := *rec
+	if st, err := a.store.GetDDNSState(r.ID); err == nil {
+		r.LastIP = st.LastIP
+	}
+	changed, ip, serr := a.cf.Sync(&r, "")
 	if serr != nil {
-		_ = a.store.UpdateDDNSResult(r.ID, "", serr.Error())
+		_ = a.store.SetDDNSState(r.ID, "", serr.Error())
 		return "", serr
 	}
-	_ = a.store.UpdateDDNSResult(r.ID, ip, "")
+	_ = a.store.SetDDNSState(r.ID, ip, "")
 	if changed {
 		return fmt.Sprintf("已更新为 %s", ip), nil
 	}
 	return fmt.Sprintf("无需更新（%s）", ip), nil
 }
 
-func validateDDNS(r *ddns.Record) error {
-	r.Name = strings.TrimSpace(r.Name)
-	r.Source = strings.TrimSpace(r.Source)
-
-	if r.Name == "" || !strings.Contains(r.Name, ".") {
-		return fmt.Errorf("记录名必须是完整域名，如 sub.example.com")
-	}
-	if r.Type != "A" && r.Type != "AAAA" {
-		return fmt.Errorf("类型必须是 A 或 AAAA")
-	}
-	if strings.TrimSpace(r.APIToken) == "" {
-		return fmt.Errorf("Cloudflare API Token 必填")
-	}
-	if r.Source == "" {
-		return fmt.Errorf("地址来源必填（iface:wlan0 或 external）")
-	}
-	if !strings.HasPrefix(r.Source, "iface:") && r.Source != "external" {
-		return fmt.Errorf("来源必须是 iface:网卡名 或 external")
-	}
-	if r.Type == "AAAA" && r.Source == "external" {
-		return fmt.Errorf("IPv6 不支持 external 来源，请改用 iface:xxx")
-	}
-	if r.TTL == 0 {
-		r.TTL = 1
+// setAsideBrokenDB 把打不开的库连同 -wal/-shm 改名挪走，让上层重建空库。
+// 只改名不删除：坏库是唯一还能捞数据的现场。
+func setAsideBrokenDB(path string) error {
+	suffix := ".bad-" + time.Now().Format("20060102-150405")
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if _, err := os.Stat(p); err != nil {
+			continue // 不存在是正常的（例如 WAL 已清空）
+		}
+		if err := os.Rename(p, p+suffix); err != nil {
+			return fmt.Errorf("挪走 %s 失败: %w", p, err)
+		}
 	}
 	return nil
+}
+
+// channelIDs 取出全部通道主键，供清理孤儿投递记录用。
+func channelIDs(chs []forward.Channel) []int64 {
+	out := make([]int64, 0, len(chs))
+	for _, ch := range chs {
+		out = append(out, ch.ID)
+	}
+	return out
 }

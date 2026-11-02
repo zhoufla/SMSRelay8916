@@ -1,24 +1,27 @@
 // Package store 负责短信归档库（SQLite）。
 //
-// 表结构与早期 Python 版完全一致，因此可以直接复用同一个 sms.db，
-// 不需要任何数据迁移。升级逻辑只有给老库补列（delay_s、code）。
+// 这里只存"可丢数据"：短信、每个通道的投递结果、DDNS 的运行态。
+// 配置（通道、DDNS、启动参数）不在这里 —— 唯一来源是 UCI /etc/config/smsrelay。
+//
+// 因此库是可以随时重建的：打不开就改名留证后重建，配置不受影响。
+// 升级逻辑只给老库补列（delay_s、code）。
 package store
 
 import (
 	"crypto/sha1"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	// CGO 驱动：OpenWrt 包用 -tags libsqlite3 链系统的 libsqlite3（体积小、
+	// 与系统其它程序共用同一份库）；宿主机上不带该 tag 时退化为内置
+	// amalgamation，方便直接 go test。
+	_ "github.com/mattn/go-sqlite3"
 
-	"github.com/zhoufla/SMSRelay8916/internal/ddns"
-	"github.com/zhoufla/SMSRelay8916/internal/forward"
 	"github.com/zhoufla/SMSRelay8916/internal/otp"
 )
 
@@ -67,26 +70,9 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_ts ON messages(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_fw ON messages(dir, forwarded);
 
--- 运行时设置（键值）。与 config.json 的分工：
---   config.json 只放启动必需项（listen/port/db_path）
---   settings 表放可在界面上改的项（own_number 等），改完立即生效
-CREATE TABLE IF NOT EXISTS settings (
-    key        TEXT PRIMARY KEY,
-    value      TEXT NOT NULL,
-    updated_at TEXT DEFAULT (datetime('now','localtime'))
-);
-
--- 转发通道（钉钉 / 通用 webhook）
-CREATE TABLE IF NOT EXISTS channels (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT NOT NULL,
-    type       TEXT NOT NULL,
-    enabled    INTEGER DEFAULT 1,
-    config     TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now','localtime'))
-);
-
--- 每个通道各自的投递结果（一条短信 × 一个通道）
+-- 每个通道各自的投递结果（一条短信 × 一个通道）。
+-- 通道本身不在这里 —— 那是配置，唯一来源是 UCI /etc/config/smsrelay。
+-- channel_id 由 UCI 段名稳定映射而来，配置改来改去也不会断历史。
 CREATE TABLE IF NOT EXISTS channel_deliveries (
     message_id INTEGER NOT NULL,
     channel_id INTEGER NOT NULL,
@@ -97,21 +83,14 @@ CREATE TABLE IF NOT EXISTS channel_deliveries (
     PRIMARY KEY (message_id, channel_id)
 );
 
--- DDNS 记录（一条记录 = 一个域名 + 一种记录类型，A/AAAA 自由组合）
-CREATE TABLE IF NOT EXISTS ddns (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL,
-    type        TEXT NOT NULL,
-    zone_id     TEXT,
-    api_token   TEXT NOT NULL,
-    source      TEXT NOT NULL,
-    proxied     INTEGER DEFAULT 0,
-    ttl         INTEGER DEFAULT 1,
-    enabled     INTEGER DEFAULT 1,
+-- DDNS 记录的同步结果（运行态，不是配置）。
+-- 配置（域名/类型/token/开关）在 UCI 里；这里只记"上次解析到哪个 IP、有没有报错"，
+-- 属于可丢数据，升级时随库一起清空也不影响服务。
+CREATE TABLE IF NOT EXISTS ddns_state (
+    id          INTEGER PRIMARY KEY,
     last_ip     TEXT,
     last_update TEXT,
-    last_error  TEXT,
-    created_at  TEXT DEFAULT (datetime('now','localtime'))
+    last_error  TEXT
 );
 `
 
@@ -125,7 +104,7 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("创建数据目录失败: %w", err)
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		return nil, fmt.Errorf("打开数据库失败: %w", err)
 	}
@@ -661,165 +640,52 @@ func (s *Store) Paging24h() (Paging, error) {
 }
 
 // ---------------------------------------------------------------------------
-// 运行时设置
+// DDNS 运行态
 // ---------------------------------------------------------------------------
 
-// GetSetting 读取一个设置项。
-func (s *Store) GetSetting(key string) (string, bool, error) {
-	var v string
-	err := s.db.QueryRow("SELECT value FROM settings WHERE key=?", key).Scan(&v)
-	if err == sql.ErrNoRows {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	return v, true, nil
+// DDNSState 是某条 DDNS 记录最近一次同步的结果。
+// 配置（域名/类型/token/开关）在 UCI 里；这里只存"上次解析到哪个 IP、
+// 有没有报错"，属于可丢数据，升级时随库清空也不影响服务。
+type DDNSState struct {
+	LastIP     string
+	LastUpdate string
+	LastError  string
 }
 
-// SetSetting 写入或覆盖一个设置项。
-func (s *Store) SetSetting(key, value string) error {
+// GetDDNSState 读取一条记录的状态。没有记录时返回零值，不算错误。
+func (s *Store) GetDDNSState(id int64) (DDNSState, error) {
+	var st DDNSState
+	var ip, upd, errMsg sql.NullString
+	err := s.db.QueryRow(
+		"SELECT last_ip, last_update, last_error FROM ddns_state WHERE id=?", id).
+		Scan(&ip, &upd, &errMsg)
+	if err == sql.ErrNoRows {
+		return st, nil
+	}
+	if err != nil {
+		return st, err
+	}
+	st.LastIP, st.LastUpdate, st.LastError = ip.String, upd.String, errMsg.String
+	return st, nil
+}
+
+// SetDDNSState 记录一次同步结果。ip 为空表示这次没拿到地址（只更新错误与时间）。
+// 成功后 last_error 清空；写空字符串等价于"恢复正常"。
+func (s *Store) SetDDNSState(id int64, ip, errMsg string) error {
 	_, err := s.db.Exec(
-		`INSERT INTO settings (key, value) VALUES (?, ?)
-		 ON CONFLICT(key) DO UPDATE SET
-		   value=excluded.value,
-		   updated_at=datetime('now','localtime')`,
-		key, value)
+		`INSERT INTO ddns_state (id, last_ip, last_update, last_error)
+		 VALUES (?,?,datetime('now','localtime'),?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   last_ip=COALESCE(NULLIF(excluded.last_ip,''), ddns_state.last_ip),
+		   last_error=NULLIF(excluded.last_error,''),
+		   last_update=excluded.last_update`,
+		id, ip, errMsg)
 	return err
-}
-
-// DeleteSetting 删除一个设置项（回到默认行为）。
-func (s *Store) DeleteSetting(key string) error {
-	_, err := s.db.Exec("DELETE FROM settings WHERE key=?", key)
-	return err
-}
-
-// AllSettings 返回全部设置项。
-func (s *Store) AllSettings() (map[string]string, error) {
-	rows, err := s.db.Query("SELECT key, value FROM settings")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := make(map[string]string)
-	for rows.Next() {
-		var k, v string
-		if err := rows.Scan(&k, &v); err != nil {
-			return nil, err
-		}
-		out[k] = v
-	}
-	return out, rows.Err()
 }
 
 // ---------------------------------------------------------------------------
-// 转发通道
+// 通道投递记录
 // ---------------------------------------------------------------------------
-
-func boolToInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
-const channelCols = "id, name, type, enabled, config"
-
-func scanChannel(r rowScanner) (*forward.Channel, error) {
-	var (
-		c       forward.Channel
-		enabled int
-		cfgJSON string
-	)
-	if err := r.Scan(&c.ID, &c.Name, &c.Type, &enabled, &cfgJSON); err != nil {
-		return nil, err
-	}
-	c.Enabled = enabled != 0
-	if cfgJSON != "" {
-		_ = json.Unmarshal([]byte(cfgJSON), &c.Config)
-	}
-	return &c, nil
-}
-
-// ListChannels 列出通道。enabledOnly 为 true 时只返回启用的。
-func (s *Store) ListChannels(enabledOnly bool) ([]forward.Channel, error) {
-	q := "SELECT " + channelCols + " FROM channels"
-	if enabledOnly {
-		q += " WHERE enabled=1"
-	}
-	q += " ORDER BY id"
-
-	rows, err := s.db.Query(q)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []forward.Channel
-	for rows.Next() {
-		c, err := scanChannel(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *c)
-	}
-	return out, rows.Err()
-}
-
-// GetChannel 按 id 取一条通道。
-func (s *Store) GetChannel(id int64) (*forward.Channel, error) {
-	row := s.db.QueryRow("SELECT "+channelCols+" FROM channels WHERE id=?", id)
-	c, err := scanChannel(row)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	return c, err
-}
-
-// CreateChannel 新建通道，成功后回填 ID。
-func (s *Store) CreateChannel(c *forward.Channel) error {
-	b, err := json.Marshal(c.Config)
-	if err != nil {
-		return err
-	}
-	res, err := s.db.Exec(
-		"INSERT INTO channels (name, type, enabled, config) VALUES (?,?,?,?)",
-		c.Name, c.Type, boolToInt(c.Enabled), string(b))
-	if err != nil {
-		return err
-	}
-	c.ID, _ = res.LastInsertId()
-	return nil
-}
-
-// UpdateChannel 更新通道。
-func (s *Store) UpdateChannel(c *forward.Channel) error {
-	b, err := json.Marshal(c.Config)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.Exec(
-		"UPDATE channels SET name=?, type=?, enabled=?, config=? WHERE id=?",
-		c.Name, c.Type, boolToInt(c.Enabled), string(b), c.ID)
-	return err
-}
-
-// DeleteChannel 删除通道及其投递记录。
-func (s *Store) DeleteChannel(id int64) error {
-	if _, err := s.db.Exec("DELETE FROM channels WHERE id=?", id); err != nil {
-		return err
-	}
-	_, err := s.db.Exec("DELETE FROM channel_deliveries WHERE channel_id=?", id)
-	return err
-}
-
-// ChannelCount 返回通道总数（用于判断是否需要从 config.json 迁移）。
-func (s *Store) ChannelCount() (int, error) {
-	var n int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM channels").Scan(&n)
-	return n, err
-}
 
 // DeliveryStatus 返回某条短信在某个通道上的投递状态（空表示还没投过）。
 func (s *Store) DeliveryStatus(messageID, channelID int64) string {
@@ -858,100 +724,34 @@ func (s *Store) ResetDeliveries(messageID int64) error {
 	return err
 }
 
-// ---------------------------------------------------------------------------
-// DDNS 记录
-// ---------------------------------------------------------------------------
-
-// 用 IFNULL 把可空列统一成空字符串，避免 Scan 到 NULL 报错。
-const ddnsCols = `id, name, type, IFNULL(zone_id,''), api_token, source,
-       proxied, ttl, enabled, IFNULL(last_ip,''), IFNULL(last_update,''), IFNULL(last_error,'')`
-
-func scanDDNS(r rowScanner) (*ddns.Record, error) {
-	var (
-		rec     ddns.Record
-		proxied int
-		enabled int
-	)
-	err := r.Scan(&rec.ID, &rec.Name, &rec.Type, &rec.ZoneID, &rec.APIToken,
-		&rec.Source, &proxied, &rec.TTL, &enabled,
-		&rec.LastIP, &rec.LastUpdate, &rec.LastError)
-	if err != nil {
-		return nil, err
-	}
-	rec.Proxied = proxied != 0
-	rec.Enabled = enabled != 0
-	return &rec, nil
-}
-
-// ListDDNS 列出全部 DDNS 记录。
-func (s *Store) ListDDNS() ([]ddns.Record, error) {
-	rows, err := s.db.Query("SELECT " + ddnsCols + " FROM ddns ORDER BY id")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []ddns.Record
-	for rows.Next() {
-		r, err := scanDDNS(rows)
-		if err != nil {
-			return nil, err
+// PruneDeliveries 删掉已经不在配置里的通道所对应的投递记录。
+//
+// 通道从 UCI 里删掉后，库里的投递行就成了孤儿：不影响功能，但会让"某条短信
+// 是否已全部转发"的判断永远为假。启动时调一次即可，成本只有一次全表扫描。
+func (s *Store) PruneDeliveries(alive []int64) (int64, error) {
+	q := "DELETE FROM channel_deliveries"
+	var args []interface{}
+	if len(alive) > 0 {
+		q += " WHERE channel_id NOT IN (" + placeholders(len(alive)) + ")"
+		for _, id := range alive {
+			args = append(args, id)
 		}
-		out = append(out, *r)
 	}
-	return out, rows.Err()
-}
-
-// GetDDNS 按 id 取记录。
-func (s *Store) GetDDNS(id int64) (*ddns.Record, error) {
-	row := s.db.QueryRow("SELECT "+ddnsCols+" FROM ddns WHERE id=?", id)
-	r, err := scanDDNS(row)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	return r, err
-}
-
-// CreateDDNS 新建记录。
-func (s *Store) CreateDDNS(r *ddns.Record) error {
-	res, err := s.db.Exec(
-		`INSERT INTO ddns (name, type, zone_id, api_token, source, proxied, ttl, enabled)
-		 VALUES (?,?,?,?,?,?,?,?)`,
-		r.Name, r.Type, r.ZoneID, r.APIToken, r.Source,
-		boolToInt(r.Proxied), r.TTL, boolToInt(r.Enabled))
+	res, err := s.db.Exec(q, args...)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	r.ID, _ = res.LastInsertId()
-	return nil
+	return res.RowsAffected()
 }
 
-// UpdateDDNS 更新记录配置。
-func (s *Store) UpdateDDNS(r *ddns.Record) error {
-	_, err := s.db.Exec(
-		`UPDATE ddns SET name=?, type=?, zone_id=?, api_token=?, source=?,
-		   proxied=?, ttl=?, enabled=? WHERE id=?`,
-		r.Name, r.Type, r.ZoneID, r.APIToken, r.Source,
-		boolToInt(r.Proxied), r.TTL, boolToInt(r.Enabled), r.ID)
-	return err
-}
-
-// DeleteDDNS 删除记录。
-func (s *Store) DeleteDDNS(id int64) error {
-	_, err := s.db.Exec("DELETE FROM ddns WHERE id=?", id)
-	return err
-}
-
-// UpdateDDNSResult 记录一次同步结果。
-func (s *Store) UpdateDDNSResult(id int64, ip, errMsg string) error {
-	if errMsg != "" {
-		_, err := s.db.Exec(
-			"UPDATE ddns SET last_error=?, last_update=datetime('now','localtime') WHERE id=?",
-			errMsg, id)
-		return err
+// placeholders 生成 "?,?,?" 形式的占位符。
+func placeholders(n int) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte('?')
 	}
-	_, err := s.db.Exec(
-		"UPDATE ddns SET last_ip=?, last_error=NULL, last_update=datetime('now','localtime') WHERE id=?",
-		ip, id)
-	return err
+	return b.String()
 }

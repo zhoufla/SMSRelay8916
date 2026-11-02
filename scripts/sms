@@ -7,13 +7,10 @@
 #   sms send <号码> <内容>  发送（超长自动拆分）
 #   sms fwd-test           向所有启用通道发测试消息
 #
-# 监听端口与接口口令自动从 /etc/smsrelay/config.json 读取：
-# listen_port 改了这里跟着变；api_token 设置后这里自动带上 X-Token 头。
-CONF="/etc/smsrelay/config.json"
-if [ -r "$CONF" ] && command -v jq >/dev/null 2>&1; then
-    PORT=$(jq -r '.listen_port // 8088' "$CONF" 2>/dev/null)
-    TOKEN=$(jq -r '.api_token // ""' "$CONF" 2>/dev/null)
-fi
+# 监听端口与接口口令直接从 UCI 读取（配置的唯一来源）：
+# uci get smsrelay.main.listen_port / api_token，改完 uci commit 即生效。
+PORT=$(uci -q get smsrelay.main.listen_port 2>/dev/null)
+TOKEN=$(uci -q get smsrelay.main.api_token 2>/dev/null)
 PORT="${PORT:-8088}"
 BASE="http://127.0.0.1:${PORT}"
 

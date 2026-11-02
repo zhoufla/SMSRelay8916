@@ -84,14 +84,16 @@ type SettingsPayload struct {
 	OwnNumberSource string            `json:"own_number_source"`
 	Values          map[string]string `json:"values"`
 	APITokenSet     bool              `json:"api_token_set"`
+	// ReadOnly 告诉前端"配置请在 LuCI 改"，旧页面据此隐藏编辑控件。
+	ReadOnly bool `json:"read_only"`
 }
 
 // Backend 由 main 实现，提供业务能力。用接口是为了避免 api 反向依赖 main。
 type Backend interface {
 	Status() StatusPayload
 	System() interface{}
+	// Settings 只读：配置的唯一来源是 UCI，写入口在 LuCI。
 	Settings() interface{}
-	UpdateSettings(map[string]string) error
 	ListMessages(q store.ListQuery) ([]store.Message, int, error)
 	SendSMS(number, text string) SendOutcome
 	ForwardTest() error
@@ -102,17 +104,10 @@ type Backend interface {
 	CleanupNow() (int64, error)
 	// 内存环形缓冲里的运行日志
 	Logs(limit int, level string) []logbuf.Entry
-	// Wi-Fi 管理（nmcli 封装；连接是同步长操作，最长约 50s）
-	// AP / 客户端模式切换（同样同步长操作，最长约 50s）
+	// 通道与 DDNS 同样只读：配置在 UCI，/api/* 只提供展示与连通性测试
 	ListChannels() ([]forward.Channel, error)
-	CreateChannel(*forward.Channel) error
-	UpdateChannel(*forward.Channel) error
-	DeleteChannel(int64) error
 	TestChannel(int64) error
 	ListDDNS() ([]ddns.Record, error)
-	CreateDDNS(*ddns.Record) error
-	UpdateDDNS(*ddns.Record) error
-	DeleteDDNS(int64) error
 	SyncDDNSNow(int64) (string, error)
 	Token() string
 }
@@ -226,12 +221,12 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.backend.Settings())
 
 	case r.Method == http.MethodPut && path == "/api/settings":
-		s.updateSettings(w, r)
+		configMoved(w)
 
 	case path == "/api/channels" && r.Method == http.MethodGet:
 		s.listChannels(w)
 	case path == "/api/channels" && r.Method == http.MethodPost:
-		s.createChannel(w, r)
+		configMoved(w)
 	case channelTestRe.MatchString(path) && r.Method == http.MethodPost:
 		s.testChannel(w, r, pathID(channelTestRe, path))
 	case channelIDRe.MatchString(path):
@@ -240,7 +235,7 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	case path == "/api/ddns" && r.Method == http.MethodGet:
 		s.listDDNS(w)
 	case path == "/api/ddns" && r.Method == http.MethodPost:
-		s.createDDNS(w, r)
+		configMoved(w)
 	case ddnsSyncRe.MatchString(path) && r.Method == http.MethodPost:
 		s.syncDDNS(w, pathID(ddnsSyncRe, path))
 	case ddnsIDRe.MatchString(path):
@@ -418,18 +413,16 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
-	var kv map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&kv); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
-		return
-	}
-	if err := s.backend.UpdateSettings(kv); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	// 回写完整设置，前端不用再发一次 GET
-	writeJSON(w, http.StatusOK, s.backend.Settings())
+// configMoved 统一回应"配置写入口已移到 LuCI"。
+//
+// 服务只以只读方式加载 /etc/config/smsrelay：配置由 LuCI 经 rpcd/uci 写入，
+// uci commit 触发 procd reload。留在这里的错误信息让老前端（或脚本）知道
+// 该去哪儿改，而不是收到一个语焉不详的 500。
+func configMoved(w http.ResponseWriter) {
+	writeJSON(w, http.StatusForbidden, map[string]string{
+		"error": "配置只能通过 LuCI 修改（服务只读加载 /etc/config/smsrelay）",
+		"where": "LuCI → 服务 → 短信网关",
+	})
 }
 
 func (s *Server) listChannels(w http.ResponseWriter) {
@@ -444,42 +437,12 @@ func (s *Server) listChannels(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"items": chs})
 }
 
-func (s *Server) createChannel(w http.ResponseWriter, r *http.Request) {
-	var ch forward.Channel
-	if err := json.NewDecoder(r.Body).Decode(&ch); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
-		return
-	}
-	if err := s.backend.CreateChannel(&ch); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "id": ch.ID})
-}
-
 func (s *Server) channelByID(w http.ResponseWriter, r *http.Request, id int64) {
-	switch r.Method {
-	case http.MethodPut:
-		var ch forward.Channel
-		if err := json.NewDecoder(r.Body).Decode(&ch); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
-			return
-		}
-		ch.ID = id
-		if err := s.backend.UpdateChannel(&ch); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-	case http.MethodDelete:
-		if err := s.backend.DeleteChannel(id); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-	default:
+	if r.Method != http.MethodPut && r.Method != http.MethodDelete {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
 	}
+	configMoved(w)
 }
 
 func (s *Server) testChannel(w http.ResponseWriter, r *http.Request, id int64) {
@@ -502,42 +465,12 @@ func (s *Server) listDDNS(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"items": recs})
 }
 
-func (s *Server) createDDNS(w http.ResponseWriter, r *http.Request) {
-	var rec ddns.Record
-	if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
-		return
-	}
-	if err := s.backend.CreateDDNS(&rec); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "id": rec.ID})
-}
-
 func (s *Server) ddnsByID(w http.ResponseWriter, r *http.Request, id int64) {
-	switch r.Method {
-	case http.MethodPut:
-		var rec ddns.Record
-		if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
-			return
-		}
-		rec.ID = id
-		if err := s.backend.UpdateDDNS(&rec); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-	case http.MethodDelete:
-		if err := s.backend.DeleteDDNS(id); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-	default:
+	if r.Method != http.MethodPut && r.Method != http.MethodDelete {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
 	}
+	configMoved(w)
 }
 
 func (s *Server) syncDDNS(w http.ResponseWriter, id int64) {

@@ -3,18 +3,11 @@ package store
 import (
 	"path/filepath"
 	"testing"
-
-	"github.com/zhoufla/SMSRelay8916/internal/forward"
 )
 
-func testChannel() *forward.Channel {
-	return &forward.Channel{
-		Name:    "测试通道",
-		Type:    forward.TypeWebhook,
-		Enabled: true,
-		Config:  forward.Config{URL: "https://example.com/hook"},
-	}
-}
+// testChannelID 模拟一个由 UCI 段名映射出来的通道主键。
+// 通道配置本身现在只存在于 /etc/config/smsrelay，库里只有投递记录。
+const testChannelID int64 = 1
 
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
@@ -116,12 +109,9 @@ func TestDeleteByIDs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ch := testChannel()
-	if err := st.CreateChannel(ch); err != nil {
-		t.Fatal(err)
-	}
+	chID := testChannelID
 	for _, id := range []int64{1, 2, 3} {
-		if err := st.MarkDelivery(id, ch.ID, "sent", ""); err != nil {
+		if err := st.MarkDelivery(id, chID, "sent", ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -135,10 +125,10 @@ func TestDeleteByIDs(t *testing.T) {
 	if _, err := st.Get(2); err != nil {
 		t.Fatalf("id=2 不应被删: %v", err)
 	}
-	if got := st.DeliveryStatus(1, ch.ID); got != "" {
+	if got := st.DeliveryStatus(1, chID); got != "" {
 		t.Fatalf("id=1 的投递记录应连带删除, got %q", got)
 	}
-	if got := st.DeliveryStatus(2, ch.ID); got != "sent" {
+	if got := st.DeliveryStatus(2, chID); got != "sent" {
 		t.Fatalf("id=2 的投递记录应保留, got %q", got)
 	}
 }
@@ -146,10 +136,7 @@ func TestDeleteByIDs(t *testing.T) {
 // 按天清理：早于 cutoff 的删掉，之后的保留，投递记录连带清理。
 func TestDeleteOlderThan(t *testing.T) {
 	st := openTestStore(t)
-	ch := testChannel()
-	if err := st.CreateChannel(ch); err != nil {
-		t.Fatal(err)
-	}
+	chID := testChannelID
 	for _, m := range []Message{
 		{Dir: "in", Peer: "10086", Body: "旧短信", TS: "2020-01-01T10:00:00+08", PDUType: "deliver"},
 		{Dir: "in", Peer: "10086", Body: "新短信", TS: "2026-10-31T20:15:16+08", PDUType: "deliver"},
@@ -158,10 +145,10 @@ func TestDeleteOlderThan(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := st.MarkDelivery(1, ch.ID, "sent", ""); err != nil {
+	if err := st.MarkDelivery(1, chID, "sent", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.MarkDelivery(2, ch.ID, "sent", ""); err != nil {
+	if err := st.MarkDelivery(2, chID, "sent", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -175,10 +162,10 @@ func TestDeleteOlderThan(t *testing.T) {
 	if _, err := st.Get(2); err != nil {
 		t.Fatalf("2026 年的记录不应被删: %v", err)
 	}
-	if got := st.DeliveryStatus(1, ch.ID); got != "" {
+	if got := st.DeliveryStatus(1, chID); got != "" {
 		t.Fatalf("旧记录的投递记录应连带删除, got %q", got)
 	}
-	if got := st.DeliveryStatus(2, ch.ID); got != "sent" {
+	if got := st.DeliveryStatus(2, chID); got != "sent" {
 		t.Fatalf("新记录的投递记录应保留, got %q", got)
 	}
 }

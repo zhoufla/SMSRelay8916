@@ -105,56 +105,67 @@ cd ~/github/SMSRelay8916
 1. 检查 Go ≥ 1.21
 2. 探测 `goproxy.cn` 直连是否可用；不通时才使用 `SMSRELAY_PROXY` 指定的代理（脚本**不内置任何代理地址**，`--no-proxy` 强制直连）
 3. 首次运行 `go get` 拉 `godbus/dbus/v5` 与 `modernc.org/sqlite`
-4. `CGO_ENABLED=0` 编译静态二进制
+4. `CGO_ENABLED=1` + 系统 `libsqlite3`（`-tags libsqlite3`）
 
-`CGO_ENABLED=0` 是关键：`modernc.org/sqlite` 是纯 Go 实现，关掉 cgo 后**不需要任何交叉 C 工具链**，一条命令出二进制。这也是当初选它而不是 `mattn/go-sqlite3` 的原因。
+sqlite 驱动用 `mattn/go-sqlite3`，构建时链 OpenWrt 的 `libsqlite3`（feeds 里的
+`libs/sqlite3`），而不是把 SQLite 编译进二进制：主程序小约 4.5MB，且与系统里其它
+用 sqlite 的程序共用同一份库。代价是必须用 OpenWrt 工具链编译（宿主机 gcc 编不出
+能在 musl 上跑的二进制），所以正式发版走 ipk，`openwrt/deploy.sh` 也要 `STAGING_DIR`。
 
 ## 部署
 
-```bash
-DEVICE_PASS=<设备密码> ./deploy.sh <设备地址>
-```
-
-脚本会：校验架构 → 上传 → 装到 `/opt/smsrelay/` → 沿用已有配置（优先 `/etc/smsrelay/config.json`，其次老版本的 `/etc/sms-gw/config.json`）→ 停掉遗留的 `sms-gw`（若存在）→ 启 `smsrelay` → 自检。
-
-回退到上一个二进制：
+正式路径是 OpenWrt 包：
 
 ```bash
-# 覆盖前先备份：cp /opt/smsrelay/smsrelay /opt/smsrelay/smsrelay.bak
-systemctl stop smsrelay
-cp /opt/smsrelay/smsrelay.bak /opt/smsrelay/smsrelay
-systemctl start smsrelay
+cp -a SMSRelay8916/openwrt package/smsrelay
+./scripts/feeds update packages && ./scripts/feeds install golang libsqlite3
+make package/smsrelay/compile V=99        # 产物在 bin/packages/*/base/
 ```
+
+不重刷固件的快速迭代通道（需要构建树的 staging_dir）：
+
+```bash
+STAGING_DIR=$PWD/staging_dir ./openwrt/deploy.sh <设备IP> <密码>
+```
+
+脚本会：用工具链交叉编译（CGO）→ 检查设备有 `libsqlite3` → 上传二进制/init/UCI/LuCI →
+启用并启动服务。UCI 配置只在设备上还不存在时推送，不会覆盖已改过的值。
 
 ## 配置
 
-默认读 `/etc/smsrelay/config.json`（可用 `SMSRELAY_CONFIG` 覆盖）；文件不存在时会尝试老版本留下的 `/etc/sms-gw/config.json`，两者字段名完全一致。
+配置的唯一来源是 UCI `/etc/config/smsrelay`，用 **LuCI → 服务 → 短信网关 → 设置**
+修改；`uci commit` 后 procd 按 reload trigger 自动重启服务。程序**只读**这个文件，
+不回写，所以不存在两个写入口互相覆盖的问题。
 
-```json
-{
-  "listen_host": "0.0.0.0",
-  "listen_port": 8088,
-  "api_token": "",
-  "db_path": "/var/lib/smsrelay/sms.db",
-  "guard_interval": 60,
-  "modem_index": "0",
-  "web_dir": "/opt/smsrelay/web",
-  "own_number": "13800000000",
-  "dingtalk": {
-    "enabled": true,
-    "url": "https://oapi.dingtalk.com/robot/send?access_token=...",
-    "prefix": "【短信】",
-    "max_per_min": 15
-  }
-}
+```
+config smsrelay 'main'
+	option enabled '1'
+	option listen_host '0.0.0.0'
+	option listen_port '8088'
+	option api_token ''
+	option db_path '/etc/smsrelay/sms.db'
+	option retain_days '30'
+	option own_number ''
+
+config channel 'ch_ops'
+	option name '运维群'
+	option type 'dingtalk'
+	option url 'https://oapi.dingtalk.com/robot/send?access_token=...'
+	list body_line '{"text":"%s"}'
+
+config ddns 'd_home'
+	option name 'home.example.com'
+	option type 'A'
+	option api_token '...'
+	option source 'iface:wwan0'
 ```
 
 - `api_token` 为空表示不鉴权；非空时需 `X-Token` 头或 `?token=`。
-  可在 Web 设置页直接设置/更换/清除（立即生效并回写本文件，`sms` CLI 自动跟随），
-  不必手动编辑；写好后浏览器会自动记住，CLI 靠本文件自动带鉴权头
-- `web_dir` 存在时优先用外部 `index.html`，改页面不用重编译
-- `guard_interval` 是兜底轮询秒数，设 0 用默认 60
-- 上面所有值都是**占位值**：`own_number` 换成你自己的号码（留空则跟随 SIM 卡），`access_token` 换成真实 token
+  `scripts/sms` 用 `uci get` 自动读取，不用手工同步。
+- 通道/DDNS 的**段名是稳定主键**（`ch_ops`、`d_home`），库里按它记投递历史。
+  LuCI 生成的段名（`cfg0xxxx`）请勿手改，否则历史会对不上。
+- 多行模板用 `list body_line`，每行一项；正文占位符是 `%s`。
+- 请求头用 `list header 'K: V'`。
 
 ## 运行期组件
 
@@ -178,17 +189,29 @@ sms fwd-test            # 向所有启用通道发测试消息
 `deploy.sh` 装之前会先 `sh -n` 验语法——装一个跑不起来的清理脚本比不装更糟。
 设备上缺 `jq` 时只告警不中断，`sms` 命令届时不可用（`apt-get install jq` 即可）。
 
-数据与配置都在 root 下，注意备份：
+数据只有一处：`/etc/smsrelay/sms.db`（overlay 持久；不要放 `/var`，那是 tmpfs）。
 
-```
-/var/lib/smsrelay/sms.db     归档库（含短信、通道、DDNS、设置）
-/etc/smsrelay/config.json    配置（含 token，权限 600）
-```
+| 路径 | 内容 | 升级后 |
+|---|---|---|
+| `/etc/config/smsrelay` | **全部配置**（启动参数、通道、DDNS），声明为 conffile | **保留** |
+| `/etc/smsrelay/sms.db` | 短信归档 + 投递记录 + DDNS 运行态 | 丢弃（可丢数据） |
+| `/var/log` | 运行日志（tmpfs） | 不保留 |
+
+### 升级（sysupgrade）的行为
+
+配置在 `/etc/config/` 下，`base-files` 的保留清单本来就覆盖它，所以**配置自动保留，
+不需要任何自定义 keep.d**。短信库不在保留清单里，升级时随 overlay 一起清空 ——
+这是刻意的：历史短信不需要跨版本带走，库坏了也直接删掉重建即可，不会影响服务启动。
+
+> 想要连短信一起带走的话，在 `/etc/sysupgrade.conf` 里加一行 `/etc/smsrelay/`，
+> 但要注意 sysupgrade 打包配置时服务还在跑，库是被热拷的。
 
 ## 转发通道与模板
 
-通道在界面上配置（`/api/channels`），支持 `dingtalk` 与 `webhook` 两种类型，可同时启用多条。
-每条通道的投递结果独立记账，一条失败不会让其它通道重推。
+通道在 LuCI 里配置（`/etc/config/smsrelay` 的 `config channel` 段），支持 `dingtalk`
+与 `webhook` 两种类型，可同时启用多条。每条通道的投递结果独立记账（
+`channel_deliveries` 表），一条失败不会让其它通道重推。API 的 `/api/channels` 只读，
+写入会返回 403 并提示去 LuCI 改。
 
 模板占位符（纯文本用不带后缀的，JSON 里用 `_json` 后缀）：
 
@@ -217,7 +240,7 @@ webhook 的正文模板留空时，使用下面这个合法 JSON 默认模板：
 
 | 项 | 做法 |
 |---|---|
-| `config.json`（含 token、本机号码） | 在 `.gitignore` 里，永不入库；只存在设备本地 |
+| `/etc/config/smsrelay`（含 token、本机号码） | 设备本地配置，入库的是 `openwrt/files/` 下的**示例值**，不含真实凭证 |
 | 钉钉 / Cloudflare Token | 只出现在设备上的配置文件与数据库；接口返回一律脱敏成 `****1234` |
 | 设备地址、密码、代理 | 脚本不内置，全部通过参数或环境变量传入 |
 | 文档里的号码 / IP / IPv6 | 全部为占位值（`13800000000`、`192.168.1.100`、`203.0.113.10`、`2409:xxxx:...`） |

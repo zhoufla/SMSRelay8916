@@ -3,11 +3,26 @@
     "title": "短信网关",
     "order": 60,
     "action": {
-      "type": "view",
-      "path": "smsrelay/index"
+      "type": "firstchild"
     },
     "depends": {
       "acl": [ "luci-app-smsrelay" ]
+    }
+  },
+  "admin/services/smsrelay/config": {
+    "title": "设置",
+    "order": 10,
+    "action": {
+      "type": "view",
+      "path": "smsrelay/config"
+    }
+  },
+  "admin/services/smsrelay/messages": {
+    "title": "短信记录",
+    "order": 20,
+    "action": {
+      "type": "view",
+      "path": "smsrelay/index"
     }
   }
 }

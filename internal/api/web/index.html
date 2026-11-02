@@ -189,8 +189,9 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
   <div class="tabs" id="tabs">
     <button data-tab="sms" class="act">短信</button>
     <button data-tab="sys">系统</button>
-    <button data-tab="set">设置</button>
-    <button data-tab="ddns">DDNS</button>
+    <!-- 配置已迁到 LuCI：服务只读加载 /etc/config/smsrelay，本页不再提供编辑 -->
+    <a href="/cgi-bin/luci/admin/services/smsrelay/config" target="_top"
+       style="display:inline-flex;align-items:center;padding:6px 12px;color:inherit;text-decoration:none;opacity:.8">设置（LuCI）↗</a>
     <button data-tab="log">日志</button>
   </div>
 

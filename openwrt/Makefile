@@ -24,12 +24,19 @@ PKG_SOURCE_VERSION?=9a2703ff4105cbd691032bf21aa811314ae94d8c
 PKG_MIRROR_HASH:=skip
 
 PKG_MAINTAINER:=zhoufla <https://github.com/zhoufla>
-PKG_BUILD_DEPENDS:=golang/host
+PKG_BUILD_DEPENDS:=golang/host libsqlite3
 PKG_BUILD_PARALLEL:=1
 
 GO_PKG:=github.com/zhoufla/SMSRelay8916
 GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/smsrelay
 GO_PKG_LDFLAGS_X:=main.Version=$(PKG_VERSION)
+# 链系统的 libsqlite3，而不是让 mattn/go-sqlite3 内嵌一份 amalgamation：
+# 主程序因此小约 4.5MB，且与系统里其它用 sqlite 的程序共用同一份库。
+# golang-package.mk 默认 CGO_ENABLED=1，并会带上 TARGET_CC 与 CGO_*FLAGS。
+GO_PKG_TAGS:=libsqlite3
+# 去掉 DWARF 与符号表：Go 二进制带调试信息约 16MB，去掉后约 7.7MB。
+# 设备上只有 192MB rootfs，这 8MB 值得省；排障靠日志而非 gdb。
+GO_PKG_LDFLAGS:=-s -w
 # go:embed 的 Web 资源（index.html / manifest / icons）不属于默认拷贝的
 # 源码扩展名清单，不显式带上构建会直接失败。匹配的是相对路径。
 GO_PKG_INSTALL_EXTRA:=^./internal/api/web/
@@ -42,7 +49,7 @@ define Package/smsrelay
   CATEGORY:=Network
   TITLE:=SMS gateway for jz02v10 (MSM8916 stick)
   URL:=https://github.com/zhoufla/SMSRelay8916
-  DEPENDS:=$(GO_ARCH_DEPENDS) +dbus +modemmanager
+  DEPENDS:=$(GO_ARCH_DEPENDS) +dbus +modemmanager +libsqlite3
 endef
 
 define Package/smsrelay/description
@@ -50,8 +57,10 @@ define Package/smsrelay/description
   Receives SMS via ModemManager D-Bus signals (zero polling when idle),
   archives to SQLite, forwards to DingTalk/webhook channels and serves
   a Web UI on :8088, embedded into LuCI as an iframe.
-  Startup config comes from UCI (/etc/config/smsrelay); runtime state
-  (channels / DDNS / settings) lives in the app's own SQLite DB.
+  All configuration lives in UCI (/etc/config/smsrelay) and is edited
+  from LuCI; the daemon only reads it. The SQLite DB holds the SMS
+  archive and runtime state (delivery results / DDNS last IP), which
+  is disposable across firmware upgrades.
 endef
 
 define Package/smsrelay/conffiles
@@ -77,6 +86,8 @@ define Package/smsrelay/install
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/smsrelay
 	$(INSTALL_DATA) ./files/www/luci-static/resources/view/smsrelay/index.js \
 		$(1)/www/luci-static/resources/view/smsrelay/index.js
+	$(INSTALL_DATA) ./files/www/luci-static/resources/view/smsrelay/config.js \
+		$(1)/www/luci-static/resources/view/smsrelay/config.js
 endef
 
 $(eval $(call GoBinPackage,smsrelay))

@@ -1,27 +1,59 @@
-# smsrelay —— jz02v10 短信网关的启动配置（UCI）
+# smsrelay —— 短信网关配置（UCI）
 #
-# /etc/init.d/smsrelay 每次启动都会把这里渲染成 /etc/smsrelay/config.json
-# 再传给程序，所以手改 config.json 会在重启后丢失，要改请改这里。
-# 例外：Web 界面里设置的 api_token 会被自动保留（本文件 api_token 留空时）。
-# 通道、DDNS、保留天数等运行期配置不在这里——那些在 Web 设置页里改，存于应用自己的数据库。
+# 唯一配置来源：程序只读本文件，不写。用 LuCI（服务 → 短信网关 → 设置）修改，
+# uci commit 后 procd 会自动重启服务，不需要手动 /etc/init.d/smsrelay restart。
+#
+# 短信归档在 /etc/smsrelay/sms.db，属于可丢数据：
+# 升级固件时整库会被丢弃，配置则因为位于 /etc/config/ 而自动保留。
 
-config main 'main'
-	# 服务开关（0 时 start 不拉起任何实例）
+config smsrelay 'main'
+	# 服务总开关
 	option enabled '1'
-	# LTE 保活实例：周期 ICMP 防 ECM-IDLE 空闲态收不到寻呼导致短信延迟。
-	# 注意 OpenWrt 下无 nmcli，脚本里的断网重拨不可用，保活部分正常。
+	# LTE 保活：周期 ICMP，防 ECM-IDLE 空闲态收不到寻呼导致短信延迟
 	option keepalive '1'
-	# Web/API 监听地址与端口
+	# Web/API 监听
 	option listen_host '0.0.0.0'
 	option listen_port '8088'
-	# 访问口令：留空 = 不鉴权；推荐用 Web 设置页设置（重启后仍保留）。
-	# 若在此填写，Web 设置页设置的值将以这里为准。
+	# 接口口令：留空 = 不鉴权
 	option api_token ''
-	# 归档库位置（/var 是 tmpfs，重启即丢，别放那里）
+	# 归档库位置（别放 /var，那是 tmpfs，重启即丢）
 	option db_path '/etc/smsrelay/sms.db'
-	# 兜底扫描间隔秒：漏掉 D-Bus 信号时最坏恢复时间
+	# 短信保留天数，0 = 不自动清理
+	option retain_days '30'
+	# 本机号码：留空则跟随 SIM 卡（很多卡不写 EF_MSISDN）
+	option own_number ''
+	# 兜底扫描间隔（秒）：漏掉 D-Bus 信号时最坏多久能恢复
 	option guard_interval '60'
 	# ModemManager 的 modem 编号
 	option modem_index '0'
-	# 本机号码（留空跟随 SIM 卡；Web 设置页设置的值优先级更高）
-	option own_number ''
+
+# 转发通道。
+# 段名（ch_xxx）是稳定主键，库里按它记投递历史 —— 由 LuCI 生成后请勿手改。
+config channel 'ch_demo'
+	option name '示例 webhook'
+	option type 'webhook'
+	option enabled '0'
+	option url 'https://example.com/hook'
+	option method 'POST'
+	option prefix '【短信】'
+	# 模板的每一行一个 list 项，程序用换行拼回去；正文占位符是 %s
+	list body_line '{"text":"%s"}'
+	# 请求头：list header 'K: V'
+	list header 'Content-Type: application/json'
+	# 转发条件：全部留空 = 接收所有短信；多个条件之间 AND
+	option match_peer ''
+	option match_keyword ''
+	option match_skip_keyword ''
+	option match_code_only '0'
+
+# DDNS 记录（Cloudflare）。段名同样是主键。
+config ddns 'd_demo'
+	option name 'home.example.com'
+	option type 'A'
+	option zone_id ''
+	option api_token ''
+	# iface:wwan0 取本机网卡地址；external 走公网接口查询
+	option source 'external'
+	option proxied '0'
+	option ttl '1'
+	option enabled '0'
