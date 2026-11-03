@@ -31,6 +31,10 @@ config smsrelay 'main'
 	# 模组扫不到 46000」，这时填完整列表放开，例如：
 	# egsm|dcs|pcs|g850|utran-1|utran-2|utran-3|utran-5|utran-8|eutran-1|eutran-2|eutran-3|eutran-5|eutran-7|eutran-8|eutran-20|eutran-39|eutran-40
 	option bands ''
+	# 锁定运营商（可选）：本网 MCCMNC，移动 46000 / 联通 46001 / 电信 46011。
+	# 留空 = 自动选网。模组卡在别家网络（如 CHN-CT）或一直 searching 时填上，
+	# 保活脚本会在基带就绪后强制注册回本网。
+	option operator ''
 
 # 转发通道。
 # 段名（ch_xxx）是稳定主键，库里按它记投递历史 —— 由 LuCI 生成后请勿手改。

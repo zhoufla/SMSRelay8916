@@ -73,6 +73,14 @@ return view.extend({
 			'eutran-1|eutran-2|eutran-3|eutran-5|eutran-7|eutran-8|eutran-20|eutran-39|eutran-40';
 		o.rmempty = true;
 
+		o = s.option(form.Value, 'operator', _('锁定运营商（PLMN）'),
+			_('可选。留空 = 自动选网。填本网 MCCMNC：移动 46000、联通 46001、电信 46011。' +
+			  '模组卡在别家网络（如 CHN-CT）或一直 searching 时填上，' +
+			  '保活脚本会在基带就绪后强制注册回本网；已在本网则不做任何动作。'));
+		o.placeholder = '46000';
+		o.datatype = 'uinteger';
+		o.rmempty = true;
+
 		o = s.option(form.Value, 'db_path', _('归档库路径'),
 			_('别放 /var（tmpfs，重启即丢）'));
 		o.placeholder = '/etc/smsrelay/sms.db';

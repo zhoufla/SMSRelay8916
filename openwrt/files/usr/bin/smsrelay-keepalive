@@ -25,6 +25,11 @@
 # 表现为注册不上、一直 searching。填完整频段列表即可放开；留空则完全不碰模组。
 # 下发的值会先与本机 supported 求交集，所以同一份配置可以跨机型共用
 # （sp970 只支持 eutran-1/3/5，写全套只会被裁到它支持的部分，不会报错）。
+#
+# 锁定运营商（可选，UCI smsrelay.main.operator）：值是本网 MCCMNC（移动 46000、
+# 联通 46001、电信 46011），留空 = 自动选网。模组在别家网络（例如 CHN-CT）上
+# 空转、或一直在 searching 时，用 --3gpp-register-in-operator 强制回本网；
+# 已注册到目标网络时什么都不做。
 
 IFACE=wwan0
 NETIF=modem
@@ -34,11 +39,13 @@ FAIL_LIMIT=3
 RECOVER_COOLDOWN=300
 GRACE=30
 
-# 可选 UCI 覆盖：modem 编号与频段（缺省时行为与以前完全一致）
+# 可选 UCI 覆盖：modem 编号、频段、锁定运营商（缺省时行为与以前完全一致）
 MODEM=$(uci -q get smsrelay.main.modem_index 2>/dev/null)
 MODEM=${MODEM:-0}
 # 频段统一成 mmcli 认的竖线分隔（配置里写逗号也认）
 BANDS=$(uci -q get smsrelay.main.bands 2>/dev/null | tr -d ' ' | tr ',' '|')
+# 目标运营商 MCCMNC，如 46000
+OPERATOR=$(uci -q get smsrelay.main.operator 2>/dev/null | tr -d ' ')
 
 fails=0
 last_recover=0
@@ -46,6 +53,8 @@ waiting=0
 grace_until=0
 bands_done=0
 bands_try=0
+plmn_done=0
+plmn_try=0
 
 log() { logger -t smsrelay-keepalive "$@"; }
 
@@ -134,6 +143,34 @@ apply_bands() {
 	return 1
 }
 
+# 当前注册到的运营商 MCCMNC。mmcli -m 里 operator id 只出现一次
+# （SIM 卡归属的 operator 在 mmcli -i 里，别混用）。
+registered_operator() {
+	mmcli -m "$MODEM" 2>/dev/null | sed -n 's/.*operator id: *//p' | head -n1
+}
+
+# 锁定运营商（可选）：已注册到目标网络就是 no-op。
+# 已连接时 ModemManager 拒绝 register-in-operator，所以先让 netifd 断开，
+# 注册完无论如何都要 ifup 回去，避免把链路留在 down。
+lock_operator() {
+	local cur rc
+	[ -n "$OPERATOR" ] || return 0
+	command -v mmcli >/dev/null 2>&1 || return 1
+	cur=$(registered_operator)
+	[ "$cur" = "$OPERATOR" ] && return 0
+	log "当前网络 ${cur:-未知} ≠ $OPERATOR，强制注册 $OPERATOR"
+	ifdown "$NETIF" 2>/dev/null
+	sleep 3
+	timeout 90 mmcli -m "$MODEM" --3gpp-register-in-operator="$OPERATOR" >/dev/null 2>&1
+	rc=$?
+	ifup "$NETIF" 2>/dev/null
+	if [ "$rc" -eq 0 ]; then
+		log "已强制注册到 $OPERATOR"
+		return 0
+	fi
+	return 1
+}
+
 recover() {
 	now=$(date +%s)
 	if [ $((now - last_recover)) -lt "$RECOVER_COOLDOWN" ]; then
@@ -157,15 +194,17 @@ recover() {
 	return 1
 }
 
-log "keepalive 启动：iface=$IFACE netif=$NETIF interval=${INTERVAL}s bands=${BANDS:-未配置}"
+log "keepalive 启动：iface=$IFACE netif=$NETIF interval=${INTERVAL}s bands=${BANDS:-未配置} operator=${OPERATOR:-自动}"
 while true; do
 	if ! modem_present; then
 		if [ "$waiting" = 0 ]; then
 			log "基带未就绪（MPSS 重启中），暂停保活，等 modem 出现"
 			waiting=1
-			# MPSS 重启会把频段打回默认，等它回来要重新设置一次
+			# MPSS 重启会把频段打回默认、也会丢掉强制注册，等它回来要重新做一次
 			bands_done=0
 			bands_try=0
+			plmn_done=0
+			plmn_try=0
 		fi
 		sleep "$INTERVAL"
 		continue
@@ -183,6 +222,15 @@ while true; do
 			bands_done=1
 		elif [ "$bands_try" -ge 3 ]; then
 			log "WARN 频段设置失败（已试 3 次），继续用模组当前频段"
+		fi
+	fi
+	# 频段确定之后再纠运营商：先有候选小区，选网才有意义
+	if [ "$plmn_done" = 0 ] && [ "$plmn_try" -lt 3 ]; then
+		plmn_try=$((plmn_try + 1))
+		if lock_operator; then
+			plmn_done=1
+		elif [ "$plmn_try" -ge 3 ]; then
+			log "WARN 强制注册 $OPERATOR 失败（已试 3 次），继续自动选网"
 		fi
 	fi
 	if [ "$(date +%s)" -lt "$grace_until" ]; then

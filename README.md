@@ -147,6 +147,7 @@ config smsrelay 'main'
 	option retain_days '30'
 	option own_number ''
 	option bands ''
+	option operator ''
 
 config channel 'ch_ops'
 	option name '运维群'
@@ -179,6 +180,17 @@ config ddns 'd_home'
 
   ```
   uci set smsrelay.main.bands='egsm|dcs|pcs|g850|utran-1|utran-2|utran-3|utran-5|utran-8|eutran-1|eutran-2|eutran-3|eutran-5|eutran-7|eutran-8|eutran-20|eutran-39|eutran-40'
+  uci commit smsrelay
+  ```
+
+- `operator` 用来锁定运营商（PLMN），值是本网 MCCMNC：移动 `46000`、联通 `46001`、
+  电信 `46011`；留空 = 自动选网。模组卡在别家网络（`mmcli` 里显示 `CHN-CT`、
+  `registration: searching` 那种）或一直 searching 时填它，保活脚本会在基带就绪后
+  `mmcli --3gpp-register-in-operator` 强制注册回本网。**已经在本网时不做任何动作**，
+  不会平白断链；失败重试 3 次后放弃并保留自动选网。
+
+  ```
+  uci set smsrelay.main.operator='46000'
   uci commit smsrelay
   ```
 
