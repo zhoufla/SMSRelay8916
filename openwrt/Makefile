@@ -16,11 +16,11 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=smsrelay
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=4
+PKG_RELEASE:=5
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/zhoufla/SMSRelay8916.git
-PKG_SOURCE_VERSION?=d8fabdabb683248c2f09facc4841e28719d05884
+PKG_SOURCE_VERSION?=985ed3b78068ee9eed7210a1b5c26faec9b9fd2d
 PKG_MIRROR_HASH:=skip
 
 PKG_MAINTAINER:=zhoufla <https://github.com/zhoufla>
