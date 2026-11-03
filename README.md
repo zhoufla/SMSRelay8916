@@ -187,7 +187,9 @@ config ddns 'd_home'
   电信 `46011`；留空 = 自动选网。模组卡在别家网络（`mmcli` 里显示 `CHN-CT`、
   `registration: searching` 那种）或一直 searching 时填它，保活脚本会在基带就绪后
   `mmcli --3gpp-register-in-operator` 强制注册回本网。**已经在本网时不做任何动作**，
-  不会平白断链；失败重试 3 次后放弃并保留自动选网。
+  不会平白断链；开机/重启后 modem 还没注册完（mmcli 里连 `operator id` 行都没有）时
+  先等最多 3 轮（约 30s）让自动选网自己跑，避免每次重启都白断一次链；
+  失败重试 3 次后放弃并保留自动选网。
 
   ```
   uci set smsrelay.main.operator='46000'

@@ -55,6 +55,7 @@ bands_done=0
 bands_try=0
 plmn_done=0
 plmn_try=0
+plmn_wait=0
 
 log() { logger -t smsrelay-keepalive "$@"; }
 
@@ -152,12 +153,20 @@ registered_operator() {
 # 锁定运营商（可选）：已注册到目标网络就是 no-op。
 # 已连接时 ModemManager 拒绝 register-in-operator，所以先让 netifd 断开，
 # 注册完无论如何都要 ifup 回去，避免把链路留在 down。
+# 返回值：0 已在本网/注册成功，2 还在注册中（先别动，下轮再看），1 失败。
 lock_operator() {
 	local cur rc
 	[ -n "$OPERATOR" ] || return 0
 	command -v mmcli >/dev/null 2>&1 || return 1
 	cur=$(registered_operator)
 	[ "$cur" = "$OPERATOR" ] && return 0
+	# 刚开机或刚重启时 modem 还在注册，mmcli 输出里连 operator id 行都没有。
+	# 这属于"还没注册完"，不是"跑偏了"——先让自动选网跑几轮，
+	# 否则每次服务重启都会白断一次链、重注册一次。
+	if [ -z "$cur" ] && [ "$plmn_wait" -lt 3 ]; then
+		plmn_wait=$((plmn_wait + 1))
+		return 2
+	fi
 	log "当前网络 ${cur:-未知} ≠ $OPERATOR，强制注册 $OPERATOR"
 	ifdown "$NETIF" 2>/dev/null
 	sleep 3
@@ -205,6 +214,7 @@ while true; do
 			bands_try=0
 			plmn_done=0
 			plmn_try=0
+			plmn_wait=0
 		fi
 		sleep "$INTERVAL"
 		continue
@@ -226,11 +236,16 @@ while true; do
 	fi
 	# 频段确定之后再纠运营商：先有候选小区，选网才有意义
 	if [ "$plmn_done" = 0 ] && [ "$plmn_try" -lt 3 ]; then
-		plmn_try=$((plmn_try + 1))
-		if lock_operator; then
+		lock_operator
+		plm=$?
+		if [ "$plm" -eq 0 ]; then
 			plmn_done=1
-		elif [ "$plmn_try" -ge 3 ]; then
-			log "WARN 强制注册 $OPERATOR 失败（已试 3 次），继续自动选网"
+		elif [ "$plm" -ne 2 ]; then
+			# 2 = 还在注册中，不计失败；其它非 0 才算一次尝试失败
+			plmn_try=$((plmn_try + 1))
+			if [ "$plmn_try" -ge 3 ]; then
+				log "WARN 强制注册 $OPERATOR 失败（已试 3 次），继续自动选网"
+			fi
 		fi
 	fi
 	if [ "$(date +%s)" -lt "$grace_until" ]; then
