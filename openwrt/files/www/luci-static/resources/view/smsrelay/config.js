@@ -64,6 +64,15 @@ return view.extend({
 		o = s.option(form.Value, 'modem_index', _('Modem 编号'));
 		o.placeholder = '0';
 
+		o = s.option(form.Value, 'bands', _('模组频段'),
+			_('可选。留空 = 不改动模组默认频段。竖线或逗号分隔 mmcli 频段名，' +
+			  '例如 eutran-1|eutran-3|eutran-8|eutran-39|eutran-40。' +
+			  '模组默认只开 eutran-1/3/5，到了移动 band 8/39/40 覆盖的区域会' +
+			  '「手机有信号、模组扫不到」，此时把频段放开即可；建议直接填全部支持的频段。'));
+		o.placeholder = 'egsm|dcs|pcs|g850|utran-1|utran-2|utran-3|utran-5|utran-8|' +
+			'eutran-1|eutran-2|eutran-3|eutran-5|eutran-7|eutran-8|eutran-20|eutran-39|eutran-40';
+		o.rmempty = true;
+
 		o = s.option(form.Value, 'db_path', _('归档库路径'),
 			_('别放 /var（tmpfs，重启即丢）'));
 		o.placeholder = '/etc/smsrelay/sms.db';

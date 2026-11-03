@@ -146,6 +146,7 @@ config smsrelay 'main'
 	option db_path '/etc/smsrelay/sms.db'
 	option retain_days '30'
 	option own_number ''
+	option bands ''
 
 config channel 'ch_ops'
 	option name '运维群'
@@ -166,6 +167,15 @@ config ddns 'd_home'
   LuCI 生成的段名（`cfg0xxxx`）请勿手改，否则历史会对不上。
 - 多行模板用 `list body_line`，每行一项；正文占位符是 `%s`。
 - 请求头用 `list header 'K: V'`。
+- `bands` 留空表示不动模组频段（默认）。本机模组默认只开 `eutran-1/3/5`，
+  如果所在位置的移动小区在 band 8/39/40 上，就会出现「手机有信号、模组扫不到 46000」，
+  表现为注册不上、一直 searching。这时把支持的频段全填上，保活脚本会在基带就绪时
+  通过 `mmcli --set-current-bands` 设置一次（已在目标频段则跳过，不打断链路）：
+
+  ```
+  uci set smsrelay.main.bands='egsm|dcs|pcs|g850|utran-1|utran-2|utran-3|utran-5|utran-8|eutran-1|eutran-2|eutran-3|eutran-5|eutran-7|eutran-8|eutran-20|eutran-39|eutran-40'
+  uci commit smsrelay
+  ```
 
 ## 运行期组件
 
@@ -175,7 +185,7 @@ config ddns 'd_home'
 | 组件 | 仓库文件 | 设备路径 | 作用 |
 |---|---|---|---|
 | 主程序 | `cmd/`（编译产物） | `/opt/smsrelay/smsrelay` | 收信 / 归档 / 转发 / HTTP |
-| LTE 保活+自愈 | `openwrt/files/usr/bin/smsrelay-keepalive` | `/usr/bin/smsrelay-keepalive` | 每 10 秒一个 ICMP 避免空闲态丢寻呼；连续 3 次不通走 `ifdown/ifup modem` 重拨（5 分钟冷却）；基带未就绪时静默等待、不计失败次数，全程不碰 AT 口 |
+| LTE 保活+自愈 | `openwrt/files/usr/bin/smsrelay-keepalive` | `/usr/bin/smsrelay-keepalive` | 每 10 秒一个 ICMP（按 wwan0 的源地址发，绑设备名会假失败）避免空闲态丢寻呼；连续 3 次不通走 `ifdown/ifup modem` 重拨（5 分钟冷却）；基带未就绪时静默等待、不计失败次数；按 `bands` 配置设置模组频段，全程不碰 AT 口 |
 | 每日清理 | `scripts/smsrelay-maint.sh`<br>`deploy/smsrelay-maint.service`<br>`deploy/smsrelay-maint.timer` | `/usr/local/bin/smsrelay-maint.sh` | 每天 04:10 停 MM 独占 AT 口，清掉孤儿短信分片（纯 shell，不依赖 python3） |
 | 命令行 | `scripts/sms` | `/usr/local/bin/sms` | 只依赖 `curl` + `jq` |
 

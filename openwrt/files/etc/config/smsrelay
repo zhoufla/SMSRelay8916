@@ -26,6 +26,11 @@ config smsrelay 'main'
 	option guard_interval '60'
 	# ModemManager 的 modem 编号
 	option modem_index '0'
+	# 模组频段（可选）：竖线或逗号分隔的 mmcli 频段名，留空 = 不修改模组默认频段。
+	# 本机默认只开 eutran-1/3/5，挪到移动 band 8/39/40 覆盖区会「手机有信号、
+	# 模组扫不到 46000」，这时填完整列表放开，例如：
+	# egsm|dcs|pcs|g850|utran-1|utran-2|utran-3|utran-5|utran-8|eutran-1|eutran-2|eutran-3|eutran-5|eutran-7|eutran-8|eutran-20|eutran-39|eutran-40
+	option bands ''
 
 # 转发通道。
 # 段名（ch_xxx）是稳定主键，库里按它记投递历史 —— 由 LuCI 生成后请勿手改。
