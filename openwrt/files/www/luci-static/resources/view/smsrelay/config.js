@@ -33,9 +33,11 @@ return view.extend({
 		o = s.option(form.Flag, 'keepalive', _('LTE 保活'),
 			_('周期 ICMP，避免空闲态收不到寻呼导致短信延迟'));
 		o.default = '1';
-		// 勾选值等于 default 时 LuCI 默认会 remove 掉该 option（rmempty），
-		// 配置里就不会留下 keepalive 行；显式关闭，让勾选状态真正落盘。
+		// 勾选值等于 default 时 LuCI 默认会 remove 掉该 option（rmempty）；
+		// 另外未显式配置时 cfgvalue 也回落到 default，与提交值相等会被判成
+		//「无变化」而跳过写入。两处都要关掉，勾选状态才会真正落盘。
 		o.rmempty = false;
+		o.forcewrite = true;
 
 		o = s.option(form.Value, 'listen_host', _('监听地址'));
 		o.datatype = 'ipaddr';
