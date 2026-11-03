@@ -20,9 +20,11 @@
 # 分开判断：没有 modem 就静默等待、不计失败次数；基带一出现再给 GRACE 秒
 # 宽限，让它自己完成附着，避免刚 attach 就被我们重拨打断。
 #
-# 频段（可选，UCI smsrelay.main.bands）：模组默认只开 eutran-1/3/5，
+# 频段（可选，UCI smsrelay.main.bands）：jz02v10 的模组默认只开 eutran-1/3/5，
 # 到了移动 band 8/39/40 覆盖的区域就会「手机有信号、模组扫不到 46000」，
 # 表现为注册不上、一直 searching。填完整频段列表即可放开；留空则完全不碰模组。
+# 下发的值会先与本机 supported 求交集，所以同一份配置可以跨机型共用
+# （sp970 只支持 eutran-1/3/5，写全套只会被裁到它支持的部分，不会报错）。
 
 IFACE=wwan0
 NETIF=modem
@@ -71,26 +73,62 @@ modem_present() {
 	fi
 }
 
-# 模组当前生效的频段。mmcli 把长列表折行，Bands 段里 current: 之后都是它；
-# 竖线分隔、已排序去重，便于与配置比对。
-current_bands() {
+# 归一成「排序去重、竖线分隔」，与 mmcli 输出比对时用这个形式
+norm() {
+	printf '%s' "$1" | tr '|' '\n' | sed '/^$/d' | sort -u | tr '\n' '|' | sed 's/|$//'
+}
+
+# 两个竖线分隔集合求交集（结果已归一）
+intersect() {
+	local out="" b
+	for b in $(printf '%s' "$1" | tr '|' ' '); do
+		case "|$2|" in
+			*"|$b|"*) out="${out}${out:+|}$b" ;;
+		esac
+	done
+	norm "$out"
+}
+
+# 取 mmcli Bands 段里 supported: / current: 的频段集合。mmcli 会把长列表折行，
+# 续行只有竖线和频段名，所以一路吃到本段的字段分隔线为止。
+bands_of() {
 	mmcli -m "$MODEM" 2>/dev/null \
-		| awk '/Bands/{b=1} b&&/^  ---/{exit} b&&/current:/{f=1} f{print}' \
-		| sed 's/^.*current: *//; s/^ *| *//' \
+		| awk -v key="$1:" '
+			/Bands/ { b = 1 }
+			b && /^  ---/ { exit }
+			b && index($0, key) { f = 1 }
+			f && b { print }
+		' \
+		| sed "s/^.*$1: *//; s/^ *| *//" \
 		| tr ',' '\n' | tr -d ' ' \
 		| grep -E '^(egsm|dcs|pcs|g850|utran-[0-9]+|eutran-[0-9]+)$' \
 		| sort -u | tr '\n' '|' | sed 's/|$//'
 }
 
-# 与配置一致就不动 —— 否则每次服务重启都会让模组重扫、短暂断链。
+current_bands() { bands_of current; }
+supported_bands() { bands_of supported; }
+
+# 已经是目标频段就不动 —— 否则每次服务重启都会让模组重扫、短暂断链。
+# 只会下发「配置 ∩ 本机 supported」：配置可以按机型无关写，跨机型共用不会失败
+# （SP970 只支持 egsm/dcs/pcs/g850/utran-1/5/eutran-1/3/5，写全套会被裁到它支持的部分）。
 apply_bands() {
-	local want
+	local want full have
 	[ -n "$BANDS" ] || return 0
 	command -v mmcli >/dev/null 2>&1 || return 1
-	want=$(printf '%s\n' "$BANDS" | tr '|' '\n' | sort -u | tr '\n' '|' | sed 's/|$//')
+	full=$(norm "$BANDS")
+	want=$full
+	have=$(supported_bands)
+	if [ -n "$have" ]; then
+		want=$(intersect "$full" "$have")
+		if [ -z "$want" ]; then
+			log "WARN 配置的频段本机都不支持（$full），跳过设置"
+			return 0
+		fi
+		[ "$want" = "$full" ] || log "配置的频段按本机支持裁剪：$full → $want"
+	fi
 	[ "$(current_bands)" = "$want" ] && return 0
-	if mmcli -m "$MODEM" --set-current-bands="$BANDS" >/dev/null 2>&1; then
-		log "频段已按配置设置：$BANDS"
+	if mmcli -m "$MODEM" --set-current-bands="$want" >/dev/null 2>&1; then
+		log "频段已设置：$want"
 		return 0
 	fi
 	return 1

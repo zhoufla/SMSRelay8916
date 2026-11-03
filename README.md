@@ -170,7 +170,12 @@ config ddns 'd_home'
 - `bands` 留空表示不动模组频段（默认）。本机模组默认只开 `eutran-1/3/5`，
   如果所在位置的移动小区在 band 8/39/40 上，就会出现「手机有信号、模组扫不到 46000」，
   表现为注册不上、一直 searching。这时把支持的频段全填上，保活脚本会在基带就绪时
-  通过 `mmcli --set-current-bands` 设置一次（已在目标频段则跳过，不打断链路）：
+  通过 `mmcli --set-current-bands` 设置一次（已在目标频段则跳过，不打断链路）。
+  下发的值会先与「本机模组 supported」求交集，所以**同一份配置可以跨机型共用**：
+  sp970 只支持 `egsm/dcs/pcs/g850/utran-1/5/eutran-1/3/5`，写全套也只会被裁到它支持的部分，
+  不会因为「不支持该频段」失败；交集为空时打一条 WARN 并跳过。
+
+  手写方式（也可在 LuCI「设置 → 模组频段」里填）：
 
   ```
   uci set smsrelay.main.bands='egsm|dcs|pcs|g850|utran-1|utran-2|utran-3|utran-5|utran-8|eutran-1|eutran-2|eutran-3|eutran-5|eutran-7|eutran-8|eutran-20|eutran-39|eutran-40'
