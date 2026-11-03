@@ -132,25 +132,11 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
 .sec-title{font-size:11.5px;color:var(--fg3);margin:16px 2px 8px;letter-spacing:.3px}
 .sec-title:first-child{margin-top:0}
 
-/* 设置 */
-.field{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}
-.field label{display:block;font-size:11.5px;color:var(--fg3);margin-bottom:6px}
-.field .hint{font-size:11px;color:var(--fg3);margin-top:7px;line-height:1.6}
-.field input,.field select,.field textarea{width:100%;background:var(--bg3);border:1px solid var(--line);border-radius:9px;
-  color:var(--fg);font:inherit;font-size:13.5px;padding:9px 11px;outline:0}
-.field textarea{height:76px;resize:vertical;line-height:1.5;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
-.field input:focus{border-color:var(--accent2)}
-.field .act{display:flex;gap:8px;margin-top:9px}
 .btn{padding:8px 16px;border:0;border-radius:9px;background:var(--accent2);color:#fff;
   font:inherit;font-size:13px;font-weight:600;cursor:pointer}
 .btn.ghost{background:var(--bg3);color:var(--fg2)}
 .btn:disabled{opacity:.45;cursor:not-allowed}
-.badge{display:inline-block;font-size:10px;padding:1px 7px;border-radius:5px;margin-left:6px;vertical-align:middle;font-weight:500}
-.badge.ok{background:rgba(61,220,151,.13);color:var(--in)}
-.badge.warn{background:rgba(240,163,94,.13);color:var(--warn)}
-.badge.err{background:rgba(242,109,109,.13);color:var(--err)}
-.notice{background:rgba(240,163,94,.1);border:1px solid rgba(240,163,94,.28);color:var(--warn);
-  border-radius:10px;padding:9px 11px;font-size:12px;margin-bottom:10px;line-height:1.55}
+.hint{font-size:11px;color:var(--fg3);line-height:1.6}
 
 /* 发送面板 */
 .compose{position:fixed;left:0;right:0;bottom:0;background:rgba(15,17,21,.94);
@@ -189,9 +175,8 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
   <div class="tabs" id="tabs">
     <button data-tab="sms" class="act">短信</button>
     <button data-tab="sys">系统</button>
-    <!-- 配置已迁到 LuCI：服务只读加载 /etc/config/smsrelay，本页不再提供编辑 -->
-    <a href="/cgi-bin/luci/admin/services/smsrelay/config" target="_top"
-       style="display:inline-flex;align-items:center;padding:6px 12px;color:inherit;text-decoration:none;opacity:.8">设置（LuCI）↗</a>
+    <!-- 配置已迁到 LuCI：服务只读加载 /etc/config/smsrelay，本页不提供编辑，
+         也不做跳转——LuCI 在 uhttpd 的 80，本页在 :8088，从外部无法可靠拼出地址 -->
     <button data-tab="log">日志</button>
   </div>
 
@@ -267,153 +252,6 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
     <div class="sec-title" id="m-ts" style="text-align:center;margin-top:12px"></div>
   </div>
 
-  <!-- ============ 设置 ============ -->
-  <div class="panel" id="pane-set">
-    <div id="token-warn" class="notice" style="display:none">
-      未设置访问口令。任何能访问本机端口的人都能读取短信或修改这里的配置，
-      建议在下方「接口口令」里设置一个。
-    </div>
-
-    <div class="sec-title">本机号码</div>
-    <div class="field">
-      <label>用于转发内容里显示「收信号码」<span class="badge" id="own-src">--</span></label>
-      <input id="own-num" placeholder="如 13800000000，留空则跟随 SIM 卡" inputmode="tel">
-      <div class="hint">
-        优先级：手动设置 &gt; 配置文件 &gt; SIM 卡。很多卡不写本机号码（这张就没有），
-        所以读不到时在这里填一次即可。
-      </div>
-      <div class="act">
-        <button class="btn" id="own-save">保存</button>
-        <button class="btn ghost" id="own-clear">清空</button>
-      </div>
-    </div>
-
-    <div class="sec-title">数据保留</div>
-    <div class="field">
-      <label>归档保留天数</label>
-      <input id="retain" type="number" min="0" max="3650" inputmode="numeric" placeholder="0 = 不自动清理">
-      <div class="hint">
-        超过天数的归档记录每 6 小时自动清一次（连同投递记录，不可恢复）。
-        留空或 0 表示永久保留。修改后下一轮自动生效，或点「立即清理」马上执行。
-      </div>
-      <div class="act">
-        <button class="btn" id="retain-save">保存</button>
-        <button class="btn ghost" id="retain-clean">立即清理</button>
-      </div>
-    </div>
-
-    <div class="sec-title">转发通道</div>
-    <div id="ch-list"></div>
-
-    <div class="field" id="ch-form" style="display:none">
-      <label>名称</label>
-      <input id="ch-name" placeholder="如 钉钉-家庭群">
-      <label style="margin-top:10px">类型</label>
-      <select id="ch-type">
-        <option value="dingtalk">钉钉机器人</option>
-        <option value="webhook">自定义 Webhook</option>
-      </select>
-      <label style="margin-top:10px">地址</label>
-      <input id="ch-url" placeholder="https://oapi.dingtalk.com/robot/send?access_token=...">
-      <div id="ch-dingtalk-fields">
-        <label style="margin-top:10px">加签密钥（可选，SEC 开头）</label>
-        <input id="ch-secret" placeholder="留空表示用关键词或 IP 白名单模式">
-        <label style="margin-top:10px">正文前缀</label>
-        <input id="ch-prefix" placeholder="【短信】">
-      </div>
-      <div id="ch-webhook-fields" style="display:none">
-        <label style="margin-top:10px">请求方法</label>
-        <input id="ch-method" placeholder="POST">
-        <label style="margin-top:10px">请求头（JSON，可选）</label>
-        <input id="ch-headers" placeholder='{"X-Token":"abc"}'>
-        <label style="margin-top:10px">正文模板</label>
-        <textarea id="ch-template" placeholder='{"own_number":{{own_number_json}},"from":{{number_json}},"text":{{body_json}},"ts":{{ts_json}},"id":{{id}},"dir":{{dir_json}}}'></textarea>
-        <div class="hint">
-          留空则使用上面这个默认模板。占位符：{{own_number}} 本机号、{{number}} 发送方、{{body}} 纯文本正文；
-          JSON 里请用对应的 <code>_json</code> 版本（<code>{{body_json}}</code> <b>已自带引号</b>，
-          直接写 <code>"text": {{body_json}}</code>，不要再套一层引号）、{{ts}}、{{id}}
-        </div>
-      </div>
-      <div class="sec-title" style="margin-top:14px">转发条件（空 = 全部接收）</div>
-      <label style="margin-top:10px">对端号码前缀（逗号分隔，任一命中）</label>
-      <input id="ch-match-peer" placeholder="如 106,10086">
-      <label style="margin-top:10px">正文关键词（任一命中）</label>
-      <input id="ch-match-kw" placeholder="如 验证码">
-      <label style="margin-top:10px">排除关键词（任一命中则跳过该通道）</label>
-      <input id="ch-match-skip" placeholder="如 推广,退订回T">
-      <label style="margin-top:10px;display:flex;align-items:center;gap:7px;cursor:pointer">
-        <input type="checkbox" id="ch-match-code" class="sel">仅转发验证码短信
-      </label>
-      <div class="hint">多个条件同时满足才转发到该通道。「测试」按钮不走条件，始终直发一条。</div>
-      <div class="act">
-        <button class="btn" id="ch-save">保存</button>
-        <button class="btn ghost" id="ch-cancel">取消</button>
-      </div>
-    </div>
-
-    <button class="btn" id="ch-add" style="width:100%">+ 新增通道</button>
-    <div class="hint" style="margin-top:8px">
-      短信会推送给所有启用的通道。每个通道的投递结果独立记录，某个通道故障不影响其它通道。
-    </div>
-
-    <div class="sec-title">访问</div>
-    <div class="field">
-      <label>接口口令<span class="badge" id="token-state">--</span></label>
-      <input id="api-token" type="text" autocomplete="off" placeholder="留空保存 = 关闭鉴权">
-      <div class="hint">
-        设置后所有接口（含本页）都需要口令，本页会自动记住；CLI <code>sms</code> 自动读取，无需手动配置。
-        最少 6 位，可用「随机」生成。更换或清除前请想清楚——清除后接口对局域网完全开放。
-      </div>
-      <div class="act">
-        <button class="btn" id="token-save">保存</button>
-        <button class="btn ghost" id="token-gen">随机生成</button>
-      </div>
-    </div>
-    <div class="field">
-      <div class="hint" id="set-ver">服务版本：--</div>
-    </div>
-  </div>
-
-  <!-- ============ DDNS ============ -->
-  <div class="panel" id="pane-ddns">
-    <div class="notice">
-      本机 IPv4 是运营商 CGNAT，<b>A 记录解析出来的地址外部连不进来</b>；
-      AAAA 只有 <code>iface:wlan0</code> 的地址真正可用（且需路由器放行入站）。
-      4G 的 IPv6 只下发地址、数据面不通，用它做 AAAA 没有意义。
-    </div>
-
-    <div id="ddns-list"></div>
-
-    <div class="field" id="ddns-form" style="display:none">
-      <label>域名（完整记录名）</label>
-      <input id="d-name" placeholder="sub.example.com">
-      <label style="margin-top:10px">记录类型</label>
-      <select id="d-type">
-        <option value="AAAA">AAAA — IPv6</option>
-        <option value="A">A — IPv4</option>
-      </select>
-      <label style="margin-top:10px">地址来源</label>
-      <select id="d-source">
-        <option value="iface:phy0-sta0">iface:phy0-sta0 — WiFi 网卡（推荐）</option>
-        <option value="iface:wwan0">iface:wwan0 — 4G 网卡（IPv6 不可用）</option>
-        <option value="external">external — 查询出口 IP（仅 IPv4）</option>
-      </select>
-      <label style="margin-top:10px">Cloudflare API Token</label>
-      <input id="d-token" placeholder="需要该 Zone 的 DNS 编辑权限">
-      <label style="margin-top:10px">Zone ID（可选）</label>
-      <input id="d-zone" placeholder="留空则按域名自动查找；.com.cn 这类建议手填">
-      <div class="act">
-        <button class="btn" id="d-save">保存</button>
-        <button class="btn ghost" id="d-cancel">取消</button>
-      </div>
-    </div>
-
-    <button class="btn" id="d-add" style="width:100%">+ 新增记录</button>
-    <div class="hint" style="margin-top:8px">
-      同一域名可以建两条（一条 A、一条 AAAA），也可以只建一条。每 5 分钟检查一次，地址没变不会调用 API。
-    </div>
-  </div>
-
   <!-- ============ 日志 ============ -->
   <div class="panel" id="pane-log">
     <div class="tools">
@@ -453,6 +291,8 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
 <script>
 const $ = s => document.querySelector(s);
 let dir = "", offset = 0, limit = 30, total = 0, timer = null, loading = false;
+let reloadPending = false;           // 拉取过程中又要求刷新（新短信到了），完成后补一次
+let refreshOnTop = false;            // 用户已往下翻，等滚回顶部再刷新
 let hasCode = false;                 // 只看提取到验证码的短信
 const selIds = new Set();            // 批量删除选中的 id
 let logLv = "";                      // 日志级别过滤
@@ -561,8 +401,11 @@ function render(items){
 }
 
 async function loadMessages(reset){
-  if(loading) return; loading = true;
-  if(reset){ offset = 0; }
+  // 已经在拉了就不再并发（SSE 新短信很容易撞上翻页），但要记住这次刷新的意图，
+  // 拉完补一次 —— 否则这条新短信会被静默丢弃，页面永远少一条
+  if(loading){ if(reset) reloadPending = true; return; }
+  loading = true;
+  if(reset){ offset = 0; reloadPending = false; }
   const q = encodeURIComponent($('#q').value.trim());
   try{
     const r = await api(`/api/messages?limit=${limit}&offset=${offset}&dir=${dir}&has_code=${hasCode ? 1 : 0}&q=${q}`);
@@ -577,6 +420,7 @@ async function loadMessages(reset){
     $('#more').style.display = (offset < total) ? 'block' : 'none';
   }catch(e){ }
   loading = false;
+  if(reloadPending) loadMessages(true);
 }
 
 /* ---------------- 系统 ---------------- */
@@ -649,233 +493,6 @@ async function loadSystem(){
   try{ renderSystem(await api('/api/system')); }catch(e){ }
 }
 
-/* ---------------- 设置 ---------------- */
-let sysVersion = '';
-async function loadSettings(){
-  try{
-    const s = await api('/api/settings');
-    $('#own-num').value = s.own_number || '';
-    const srcMap = {manual:'手动设置', config:'配置文件', sim:'SIM 卡', none:'未设置'};
-    const src = srcMap[s.own_number_source] || s.own_number_source || '未知';
-    const b = $('#own-src');
-    b.textContent = src;
-    b.className = 'badge ' + (s.own_number_source === 'none' ? 'err' : (s.own_number_source === 'manual' ? 'ok' : 'warn'));
-    $('#token-warn').style.display = s.api_token_set ? 'none' : 'block';
-    const tb = $('#token-state');
-    tb.textContent = s.api_token_set ? '已设置' : '未设置';
-    tb.className = 'badge ' + (s.api_token_set ? 'ok' : 'err');
-    $('#retain').value = (s.values && s.values.retain_days) || '';
-  }catch(e){ }
-  loadChannels();
-}
-async function saveOwnNumber(v){
-  try{
-    await api('/api/settings', {method:'PUT', body: JSON.stringify({own_number: v})});
-    toast(v ? '已保存' : '已清空');
-    loadSettings(); loadStatus();
-  }catch(e){ toast('保存失败：' + e.message); }
-}
-
-/* ---------------- 转发通道 ---------------- */
-let channels = [], editingCh = null;
-
-async function loadChannels(){
-  try{
-    const r = await api('/api/channels');
-    channels = r.items || [];
-    renderChannels();
-  }catch(e){ }
-}
-
-function renderChannels(){
-  if(!channels.length){
-    $('#ch-list').innerHTML = '<div class="field" style="color:var(--fg3);font-size:12.5px">还没有配置转发通道，短信只会入库，不会推送到外部。</div>';
-    return;
-  }
-  $('#ch-list').innerHTML = channels.map(c => {
-    const t = c.type === 'dingtalk' ? '钉钉' : 'Webhook';
-    const m = c.config || {};
-    const rules = [];
-    if(m.match_code_only) rules.push('仅验证码');
-    if(m.match_peer) rules.push(esc(m.match_peer) + '*');
-    if(m.match_keyword) rules.push('含:' + esc(m.match_keyword));
-    if(m.match_skip_keyword) rules.push('排除:' + esc(m.match_skip_keyword));
-    const ruleHtml = rules.length
-      ? '<span class="badge ok">' + rules.join('</span><span class="badge ok">') + '</span>' : '';
-    return `<div class="field">
-      <div style="display:flex;align-items:center;gap:7px;margin-bottom:6px;flex-wrap:wrap">
-        <strong style="font-size:13.5px">${esc(c.name)}</strong>
-        <span class="badge ${c.enabled ? 'ok' : 'err'}">${c.enabled ? '启用' : '停用'}</span>
-        <span class="badge warn">${t}</span>${ruleHtml}
-      </div>
-      <div style="font-size:11px;color:var(--fg3);word-break:break-all;line-height:1.5">${esc(c.config.url)}</div>
-      <div class="act">
-        <button class="btn ghost" data-ch="edit" data-id="${c.id}">编辑</button>
-        <button class="btn ghost" data-ch="test" data-id="${c.id}">测试</button>
-        <button class="btn ghost" data-ch="del" data-id="${c.id}" style="color:var(--err)">删除</button>
-      </div>
-    </div>`;
-  }).join('');
-}
-
-// 与 Go 侧 forward.DefaultWebhookTemplate 保持一致。
-// 留空时后端就用这个模板，所以这里预先填上，让用户改之前能看到真实格式。
-const DEFAULT_WEBHOOK_TEMPLATE = '{"own_number":{{own_number_json}},"from":{{number_json}},"text":{{body_json}},"ts":{{ts_json}},"id":{{id}},"dir":{{dir_json}}}';
-
-function toggleChannelType(){
-  const t = $('#ch-type').value;
-  $('#ch-dingtalk-fields').style.display = t === 'dingtalk' ? 'block' : 'none';
-  $('#ch-webhook-fields').style.display = t === 'webhook' ? 'block' : 'none';
-  // 切到 webhook 且模板为空时，预填默认模板（避免用户从零手写正则化的 JSON）
-  if(t === 'webhook' && !$('#ch-template').value.trim()){
-    $('#ch-template').value = DEFAULT_WEBHOOK_TEMPLATE;
-  }
-}
-
-function openChannelForm(ch){
-  editingCh = ch || null;
-  $('#ch-form').style.display = 'block';
-  $('#ch-name').value = ch ? ch.name : '';
-  $('#ch-type').value = ch ? ch.type : 'dingtalk';
-  $('#ch-url').value = ch ? (ch.config.url || '') : '';
-  $('#ch-secret').value = ch ? (ch.config.secret || '') : '';
-  $('#ch-prefix').value = ch ? (ch.config.prefix || '') : '';
-  $('#ch-method').value = ch ? (ch.config.method || '') : '';
-  $('#ch-headers').value = (ch && ch.config.headers) ? JSON.stringify(ch.config.headers) : '';
-  $('#ch-template').value = ch ? (ch.config.body_template || '') : '';
-  $('#ch-match-peer').value = ch ? (ch.config.match_peer || '') : '';
-  $('#ch-match-kw').value = ch ? (ch.config.match_keyword || '') : '';
-  $('#ch-match-skip').value = ch ? (ch.config.match_skip_keyword || '') : '';
-  $('#ch-match-code').checked = !!(ch && ch.config.match_code_only);
-  toggleChannelType();
-  $('#ch-form').scrollIntoView({behavior:'smooth', block:'nearest'});
-}
-
-async function saveChannel(){
-  const type = $('#ch-type').value;
-  const cfg = { url: $('#ch-url').value.trim(), prefix: $('#ch-prefix').value.trim() };
-
-  // 转发条件：空值不写，保持 Config JSON 干净
-  const mp = $('#ch-match-peer').value.trim();
-  if(mp) cfg.match_peer = mp;
-  const mk = $('#ch-match-kw').value.trim();
-  if(mk) cfg.match_keyword = mk;
-  const ms = $('#ch-match-skip').value.trim();
-  if(ms) cfg.match_skip_keyword = ms;
-  if($('#ch-match-code').checked) cfg.match_code_only = true;
-
-  if(type === 'dingtalk'){
-    const sec = $('#ch-secret').value.trim();
-    if(sec) cfg.secret = sec;
-  } else {
-    cfg.method = $('#ch-method').value.trim() || 'POST';
-    cfg.body_template = $('#ch-template').value;
-    const h = $('#ch-headers').value.trim();
-    if(h){
-      try{ cfg.headers = JSON.parse(h); }
-      catch(_){ toast('请求头不是合法 JSON'); return; }
-    }
-  }
-
-  const body = { name: $('#ch-name').value.trim(), type, enabled: editingCh ? editingCh.enabled : true, config: cfg };
-  try{
-    if(editingCh){
-      await api('/api/channels/' + editingCh.id, {method:'PUT', body: JSON.stringify(body)});
-    } else {
-      await api('/api/channels', {method:'POST', body: JSON.stringify(body)});
-    }
-    toast('已保存');
-    $('#ch-form').style.display = 'none';
-    editingCh = null;
-    loadChannels();
-  }catch(e){ toast('保存失败：' + e.message); }
-}
-
-
-/* ---------------- DDNS ---------------- */
-let ddnsRecs = [], editingDDNS = null;
-
-async function loadDDNS(){
-  try{
-    const r = await api('/api/ddns');
-    ddnsRecs = r.items || [];
-    renderDDNS();
-  }catch(e){ }
-}
-
-function reachBadge(r){
-  const m = {
-    ok:     ['ok',   '可达'],
-    cgnat:  ['err',  '无公网入口'],
-    nat:    ['warn', '出口 IP'],
-    'no-v6':['err',  '4G IPv6 未开通'],
-    unknown:['warn', '未知']
-  };
-  const v = m[r.reachability] || m.unknown;
-  return `<span class="badge ${v[0]}" title="${esc(r.reach_note || '')}">${v[1]}</span>`;
-}
-
-function renderDDNS(){
-  if(!ddnsRecs.length){
-    $('#ddns-list').innerHTML = '<div class="field" style="color:var(--fg3);font-size:12.5px">还没有 DDNS 记录。</div>';
-    return;
-  }
-  $('#ddns-list').innerHTML = ddnsRecs.map(r => `
-    <div class="field">
-      <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:8px">
-        <strong style="font-size:13.5px">${esc(r.name)}</strong>
-        <span class="badge warn">${esc(r.type)}</span>
-        ${reachBadge(r)}
-        <span class="badge ${r.enabled ? 'ok' : 'err'}">${r.enabled ? '启用' : '停用'}</span>
-      </div>
-      <div class="rows" style="margin:0">
-        <div class="rw"><span class="k">当前地址</span><span class="v">${esc(r.current_ip || '--')}</span></div>
-        <div class="rw"><span class="k">DNS 上的值</span><span class="v">${esc(r.last_ip || '--')}</span></div>
-        <div class="rw"><span class="k">上次同步</span><span class="v">${esc(r.last_update || '--')}</span></div>
-        ${r.last_error ? `<div class="rw"><span class="k">错误</span><span class="v" style="color:var(--err);white-space:normal">${esc(r.last_error)}</span></div>` : ''}
-      </div>
-      <div class="act">
-        <button class="btn ghost" data-d="edit" data-id="${r.id}">编辑</button>
-        <button class="btn ghost" data-d="sync" data-id="${r.id}">立即同步</button>
-        <button class="btn ghost" data-d="del" data-id="${r.id}" style="color:var(--err)">删除</button>
-      </div>
-    </div>`).join('');
-}
-
-function openDDNSForm(r){
-  editingDDNS = r || null;
-  $('#ddns-form').style.display = 'block';
-  $('#d-name').value = r ? r.name : '';
-  $('#d-type').value = r ? r.type : 'AAAA';
-  $('#d-source').value = r ? r.source : 'iface:wlan0';
-  $('#d-token').value = r ? (r.api_token || '') : '';
-  $('#d-zone').value = r ? (r.zone_id || '') : '';
-  $('#ddns-form').scrollIntoView({behavior:'smooth', block:'nearest'});
-}
-
-async function saveDDNS(){
-  const body = {
-    name: $('#d-name').value.trim(),
-    type: $('#d-type').value,
-    source: $('#d-source').value,
-    api_token: $('#d-token').value.trim(),
-    zone_id: $('#d-zone').value.trim(),
-    enabled: editingDDNS ? editingDDNS.enabled : true,
-    ttl: 1
-  };
-  try{
-    if(editingDDNS){
-      await api('/api/ddns/' + editingDDNS.id, {method:'PUT', body: JSON.stringify(body)});
-    } else {
-      await api('/api/ddns', {method:'POST', body: JSON.stringify(body)});
-    }
-    toast('已保存，正在同步…');
-    $('#ddns-form').style.display = 'none';
-    editingDDNS = null;
-    loadDDNS();
-  }catch(e){ toast('保存失败：' + e.message); }
-}
-
 /* ---------------- 日志 ---------------- */
 async function loadLogs(){
   try{
@@ -905,8 +522,6 @@ $('#tabs').addEventListener('click', e => {
   $('#fab').style.display = curTab === 'sms' ? '' : 'none';
   if(curTab !== 'sms') closeCompose();
   if(curTab === 'sys') loadSystem();
-  if(curTab === 'set'){ loadSettings(); }
-  if(curTab === 'ddns') loadDDNS();
   if(curTab === 'log') loadLogs();
 });
 
@@ -938,105 +553,6 @@ $('#q').addEventListener('input', () => { clearTimeout(window._qt); window._qt =
 $('#more').addEventListener('click', () => loadMessages(false));
 $('#fab').addEventListener('click', () => openCompose());
 $('#close').addEventListener('click', closeCompose);
-$('#own-save').addEventListener('click', () => saveOwnNumber($('#own-num').value.trim()));
-$('#own-clear').addEventListener('click', () => { $('#own-num').value = ''; saveOwnNumber(''); });
-$('#retain-save').addEventListener('click', async () => {
-  const v = $('#retain').value.trim();
-  if(v !== '' && (!/^\d+$/.test(v) || +v < 0 || +v > 3650)){ toast('保留天数必须是 0~3650 的整数'); return; }
-  try{
-    await api('/api/settings', {method:'PUT', body: JSON.stringify({retain_days: v})});
-    toast(v === '' || +v === 0 ? '已保存：不自动清理' : `已保存：保留 ${v} 天`);
-    loadSettings();
-  }catch(e){ toast('保存失败：' + e.message); }
-});
-$('#retain-clean').addEventListener('click', async () => {
-  const b = $('#retain-clean');
-  if(!confirm('按当前保留天数立即清理一次过期记录？不可恢复。')) return;
-  b.disabled = true; b.textContent = '清理中…';
-  try{
-    const r = await api('/api/maintenance/cleanup', {method:'POST'});
-    toast(r.deleted > 0 ? `已清理 ${r.deleted} 条过期记录` : '没有过期记录');
-  }catch(e){ toast('清理失败：' + e.message); }
-  b.disabled = false; b.textContent = '立即清理';
-});
-
-/* 接口口令：界面直接设置/更换/清除，保存后写入 config.json 并立即生效 */
-$('#token-gen').addEventListener('click', () => {
-  const b = new Uint8Array(16);
-  crypto.getRandomValues(b);
-  $('#api-token').value = [...b].map(x => x.toString(16).padStart(2, '0')).join('');
-});
-$('#token-save').addEventListener('click', async () => {
-  const v = $('#api-token').value.trim();
-  if(v && v.length < 6){ toast('口令至少 6 位'); return; }
-  if(!v && !confirm('确定清除口令？接口将对局域网完全开放。')) return;
-  if(v && TOKEN && v === TOKEN){ toast('与当前口令相同'); return; }
-  try{
-    await api('/api/settings', {method:'PUT', body: JSON.stringify({api_token: v})});
-    if(v) localStorage.setItem('smsgw_token', v);
-    else localStorage.removeItem('smsgw_token');
-    toast(v ? '口令已生效，页面将刷新' : '鉴权已关闭，页面将刷新');
-    // 本页所有请求用的口令在页面加载时固定，必须整页刷新换成新的，
-    // 否则旧口令 401 会弹输入框死循环
-    setTimeout(() => location.reload(), 900);
-  }catch(e){ toast('保存失败：' + e.message); }
-});
-
-/* ---------------- Wi-Fi ---------------- */
-$('#d-add').addEventListener('click', () => openDDNSForm(null));
-$('#d-save').addEventListener('click', saveDDNS);
-$('#d-cancel').addEventListener('click', () => { $('#ddns-form').style.display = 'none'; editingDDNS = null; });
-$('#ddns-list').addEventListener('click', async e => {
-  const b = e.target.closest('button[data-d]');
-  if(!b) return;
-  const id = +b.dataset.id;
-  if(b.dataset.d === 'edit'){
-    const r = ddnsRecs.find(x => x.id === id);
-    if(r) openDDNSForm(r);
-    return;
-  }
-  if(b.dataset.d === 'sync'){
-    b.disabled = true; b.textContent = '同步中…';
-    try{ const r = await api('/api/ddns/' + id + '/sync', {method:'POST'}); toast(r.message || '已同步'); }
-    catch(err){ toast('同步失败：' + err.message); }
-    b.disabled = false; b.textContent = '立即同步';
-    loadDDNS();
-    return;
-  }
-  if(b.dataset.d === 'del'){
-    if(!confirm('删除这条 DDNS 记录？不会动 Cloudflare 上已有的解析。')) return;
-    try{ await api('/api/ddns/' + id, {method:'DELETE'}); loadDDNS(); }
-    catch(err){ toast('删除失败：' + err.message); }
-  }
-});
-
-$('#ch-add').addEventListener('click', () => openChannelForm(null));
-$('#ch-type').addEventListener('change', toggleChannelType);
-$('#ch-save').addEventListener('click', saveChannel);
-$('#ch-cancel').addEventListener('click', () => { $('#ch-form').style.display = 'none'; editingCh = null; });
-$('#ch-list').addEventListener('click', async e => {
-  const b = e.target.closest('button[data-ch]');
-  if(!b) return;
-  const id = +b.dataset.id;
-
-  if(b.dataset.ch === 'edit'){
-    const ch = channels.find(c => c.id === id);
-    if(ch) openChannelForm(ch);
-    return;
-  }
-  if(b.dataset.ch === 'test'){
-    b.disabled = true; b.textContent = '发送中…';
-    try{ await api('/api/channels/' + id + '/test', {method:'POST'}); toast('测试消息已发出'); }
-    catch(err){ toast('失败：' + err.message); }
-    b.disabled = false; b.textContent = '测试';
-    return;
-  }
-  if(b.dataset.ch === 'del'){
-    if(!confirm('删除这个通道？已归档的短信不受影响。')) return;
-    try{ await api('/api/channels/' + id, {method:'DELETE'}); loadChannels(); }
-    catch(err){ toast('删除失败：' + err.message); }
-  }
-});
 // 复制到剪贴板。设备页面通常走 HTTP（非安全上下文），navigator.clipboard
 // 不可用，必须留 execCommand 降级，否则手机上点了没反应
 function copyText(t){
@@ -1184,14 +700,28 @@ function connectSSE(){
   };
 }
 
+/* 页面离顶部很近（单位 px）。用来判断"用户是否正在看最新几条"——
+ * 注意 offset 是「已加载条数」，首屏加载完就是 30，拿它判断永远是 false，
+ * 这就是之前新短信只弹提示、列表却不刷新的原因。 */
+function nearTop(){
+  return (window.pageYOffset || document.documentElement.scrollTop || 0) < 48;
+}
+
 function onNewSMS(m){
   if(m && m.dir === 'in'){
     toast('收到 ' + (m.peer || '未知号码') + ' 的短信' + (m.code ? '，验证码 ' + m.code : ''));
   }
   loadStatus();
-  // 只有用户停在列表顶部时才自动刷新，避免打断正在翻页的人
-  if(offset === 0) loadMessages(true);
+  // 新短信插在最前面：停在顶部就整页重整；已经往下翻了就不打断阅读，
+  // 只记一个标记，等滚回顶部再补刷新
+  if(nearTop()) loadMessages(true);
+  else refreshOnTop = true;
 }
+
+// 滚回顶部时补上被推迟的刷新
+window.addEventListener('scroll', () => {
+  if(refreshOnTop && nearTop()){ refreshOnTop = false; loadMessages(true); }
+}, { passive: true });
 
 /* ---------------- 启动 ---------------- */
 loadStatus(); loadMessages(true);
