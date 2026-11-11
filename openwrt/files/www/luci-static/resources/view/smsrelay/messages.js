@@ -10,7 +10,8 @@ return view.extend({
 	handleReset: null,
 	render: function() {
 		var dir = 'in', offset = 0, limit = 30, selected = {}, items = [], pending = false;
-		var writable = L.hasViewPermission();
+		// hasViewPermission() 只读时返回 false、权限信息缺失时返回 null，统一收敛成布尔值。
+		var writable = L.hasViewPermission() === true;
 		var search = E('input', { 'class': 'cbi-input-text', 'placeholder': _('搜索号码或正文') });
 		var code = E('input', { 'type': 'checkbox' });
 		var body = E('div'), page = E('span'), error = E('p', { 'style': 'color:#d33' });
@@ -43,8 +44,10 @@ return view.extend({
 					return refresh();
 				}).catch(function(err) {
 					// 保留原请求标识及内容，网络超时后再次提交不会产生重复任务。
+					// 无论业务错误还是网络/ubus 错误都恢复输入，避免弹窗卡在半禁用状态；
+					// rid 不变，重试不会产生重复任务。
 					submit.disabled = false;
-					if (err.business) { numberInput.disabled = false; textInput.disabled = false; }
+					numberInput.disabled = false; textInput.disabled = false;
 					smsrelay.error(err);
 				});
 			} }, _('发送'));
@@ -77,7 +80,7 @@ return view.extend({
 			return smsrelay.call('messages', dir, search.value, dir === 'in' && code.checked, limit, offset).then(function(data) {
 				error.textContent = ''; selected = {}; items = data.items || [];
 				var rows = [ E('tr', { 'class': 'tr table-titles' }, [
-					E('th', { 'class': 'th' }, E('input', { 'type': 'checkbox', 'disabled': !writable, 'change': function(ev) {
+					E('th', { 'class': 'th' }, E('input', { 'type': 'checkbox', 'disabled': !writable || null, 'change': function(ev) {
 						body.querySelectorAll('input[data-id]').forEach(function(el) { el.checked = ev.target.checked; selected[el.dataset.id] = el.checked; });
 					} })),
 					E('th', { 'class': 'th' }, _('时间')), E('th', { 'class': 'th' }, _('号码')),
@@ -92,7 +95,7 @@ return view.extend({
 					if (writable && dir === 'out' && m.state === 'failed') actions.push(E('button', { 'class': 'btn', 'click': function() { compose(m.peer, m.body); } }, _('重新编辑发送')));
 					if (writable) actions.push(E('button', { 'class': 'btn cbi-button-negative', 'click': function() { remove([ m.id ]); } }, _('删除')));
 					rows.push(E('tr', { 'class': 'tr' }, [
-						E('td', { 'class': 'td' }, E('input', { 'type': 'checkbox', 'data-id': m.id, 'disabled': !writable, 'change': function(ev) { selected[m.id] = ev.target.checked; } })),
+						E('td', { 'class': 'td' }, E('input', { 'type': 'checkbox', 'data-id': m.id, 'disabled': !writable || null, 'change': function(ev) { selected[m.id] = ev.target.checked; } })),
 						E('td', { 'class': 'td' }, m.ts), E('td', { 'class': 'td' }, m.peer),
 						E('td', { 'class': 'td', 'style': 'white-space:pre-wrap;overflow-wrap:anywhere;max-width:32em' }, m.body),
 						E('td', { 'class': 'td' }, dir === 'in' ? [ _('待转发'), _('已处理'), _('转发失败') ][m.forwarded] || '—' : smsrelay.state(m.state)),
@@ -112,10 +115,13 @@ return view.extend({
 			E('div', { 'class': 'cbi-section', 'style': 'display:flex;gap:10px;align-items:center;flex-wrap:wrap' }, [
 				box, search, E('label', {}, [ code, ' ' + _('仅验证码') ]),
 				E('button', { 'class': 'btn', 'click': function() { offset = 0; return refresh(); } }, _('查询 / 刷新')),
-				E('button', { 'class': 'btn cbi-button-action', 'disabled': !writable, 'click': function() { compose(); } }, _('写短信')),
-				E('button', { 'class': 'btn cbi-button-negative', 'disabled': !writable, 'click': function() {
+				E('button', { 'class': 'btn cbi-button-action', 'disabled': !writable || null, 'click': function() { compose(); } }, _('写短信')),
+				E('button', { 'class': 'btn cbi-button-negative', 'disabled': !writable || null, 'click': function() {
 					var ids = Object.keys(selected).filter(function(id) { return selected[id]; }).map(Number);
-					if (ids.length) remove(ids);
+					if (ids.length)
+						remove(ids);
+					else
+						ui.addNotification(null, E('p', {}, _('请先勾选要删除的短信')), 'info');
 				} }, _('删除所选'))
 			]), error, body, E('div', { 'class': 'cbi-section', 'style': 'display:flex;gap:12px;align-items:center' }, [ prev, page, next ])
 		]);

@@ -31,14 +31,17 @@ async function main() {
 		await page.evaluate(sources => {
 			window._ = text => text;
 			String.prototype.format = function(...values) { let i = 0; return this.replace(/%[dst]/g, () => String(values[i++])); };
-			window.E = function(tag, attrs, children) {
-				const el = document.createElement(tag);
-				for (const [key, value] of Object.entries(attrs || {})) {
-					if (typeof value === 'function') el.addEventListener(key, value);
-					else if (key === 'checked') el.checked = value !== false;
-					else if (key === 'disabled') el.disabled = !!value;
-					else if (value != null && value !== false) el.setAttribute(key, value);
-				}
+		// 与真实 LuCI dom.attr() 保持一致：函数注册为事件，其余值（含布尔 false）
+		// 一律 setAttribute。布尔属性 disabled="false" 依然会禁用元素，视图必须用
+		// null 跳过；之前这里用 property 赋值掩盖了这个差异，导致真机按钮失效。
+		window.E = function(tag, attrs, children) {
+			const el = document.createElement(tag);
+			for (const [key, value] of Object.entries(attrs || {})) {
+				if (value == null) continue;
+				if (typeof value === 'function') el.addEventListener(key, value);
+				else if (typeof value === 'object') el.setAttribute(key, JSON.stringify(value));
+				else el.setAttribute(key, value);
+			}
 				const append = child => {
 					if (Array.isArray(child)) child.forEach(append);
 					else if (child instanceof Node) el.appendChild(child);
@@ -115,6 +118,9 @@ async function main() {
 		await page.evaluate(() => { mock.offline = false; return show('messages'); });
 		assert.equal(await page.locator('#app img').count(), 0, 'SMS must render as text, not HTML');
 		assert.equal(await page.evaluate(() => window.XSS), undefined);
+		assert.equal(await page.getByRole('button', { name: '写短信', exact: true }).isDisabled(), false, 'writable session must allow composing');
+		assert.equal(await page.getByRole('button', { name: '删除所选', exact: true }).isDisabled(), false, 'writable session must allow batch delete');
+		assert.equal(await page.locator('#app input[data-id]').first().isDisabled(), false, 'row checkboxes must be selectable');
 		await page.getByRole('button', { name: '写短信', exact: true }).click();
 		await page.locator('#modal input').fill('10086');
 		await page.locator('#modal textarea').fill('测试,\n短信');
