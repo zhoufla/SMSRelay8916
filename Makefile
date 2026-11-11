@@ -26,7 +26,7 @@ tidy:
 	go mod tidy
 
 vet:
-	CGO_ENABLED=0 go vet ./...
+	CGO_ENABLED=1 go vet ./...
 
 fmt:
 	gofmt -l -w .

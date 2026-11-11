@@ -3,19 +3,13 @@
 # 唯一配置来源：程序只读本文件，不写。用 LuCI（服务 → 短信网关 → 设置）修改，
 # uci commit 后 procd 会自动重启服务，不需要手动 /etc/init.d/smsrelay restart。
 #
-# 短信归档在 /etc/smsrelay/sms.db，属于可丢数据：
-# 升级固件时整库会被丢弃，配置则因为位于 /etc/config/ 而自动保留。
+# 短信归档在 /etc/smsrelay/sms.db，保留配置升级时创建一致性快照并恢复。
 
 config smsrelay 'main'
 	# 服务总开关
 	option enabled '1'
 	# LTE 保活：周期 ICMP，防 ECM-IDLE 空闲态收不到寻呼导致短信延迟
 	option keepalive '1'
-	# Web/API 监听
-	option listen_host '0.0.0.0'
-	option listen_port '8088'
-	# 接口口令：留空 = 不鉴权
-	option api_token ''
 	# 归档库位置（别放 /var，那是 tmpfs，重启即丢）
 	option db_path '/etc/smsrelay/sms.db'
 	# 短信保留天数，0 = 不自动清理

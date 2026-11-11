@@ -8,19 +8,18 @@
 #   make package/smsrelay/compile V=99
 #
 # 源码由构建树自己从 GitHub 拉取（本目录只放打包脚本和 files/ 覆盖层）。
-# PKG_SOURCE_VERSION 固定 commit 保证可复现；CI 想跟随分支最新，
-# 在 make 前 export PKG_SOURCE_VERSION=<commit> 即可覆盖。
-# 更新版本时：改 PKG_SOURCE_VERSION 指向新 commit，PKG_RELEASE +1。
+# 默认跟随 main；发布/CI 构建在本包 Makefile 中固定为具体 commit，
+# 不导出全局 PKG_SOURCE_VERSION，以免污染构建树中的其他软件包。
 
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=smsrelay
-PKG_VERSION:=0.1.0
-PKG_RELEASE:=5
+PKG_VERSION:=0.2.0
+PKG_RELEASE:=1
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/zhoufla/SMSRelay8916.git
-PKG_SOURCE_VERSION?=985ed3b78068ee9eed7210a1b5c26faec9b9fd2d
+PKG_SOURCE_VERSION?=main
 PKG_MIRROR_HASH:=skip
 
 PKG_MAINTAINER:=zhoufla <https://github.com/zhoufla>
@@ -37,9 +36,6 @@ GO_PKG_TAGS:=libsqlite3
 # 去掉 DWARF 与符号表：Go 二进制带调试信息约 16MB，去掉后约 7.7MB。
 # 设备上只有 192MB rootfs，这 8MB 值得省；排障靠日志而非 gdb。
 GO_PKG_LDFLAGS:=-s -w
-# go:embed 的 Web 资源（index.html / manifest / icons）不属于默认拷贝的
-# 源码扩展名清单，不显式带上构建会直接失败。匹配的是相对路径。
-GO_PKG_INSTALL_EXTRA:=^./internal/api/web/
 
 include $(INCLUDE_DIR)/package.mk
 include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
@@ -55,16 +51,26 @@ endef
 define Package/smsrelay/description
   SMS gateway for the jz02v10 (Zhihe MSM8916) 4G stick.
   Receives SMS via ModemManager D-Bus signals (zero polling when idle),
-  archives to SQLite, forwards to DingTalk/webhook channels and serves
-  a Web UI on :8088, embedded into LuCI as an iframe.
-  All configuration lives in UCI (/etc/config/smsrelay) and is edited
-  from LuCI; the daemon only reads it. The SQLite DB holds the SMS
-  archive and runtime state (delivery results / DDNS last IP), which
-  is disposable across firmware upgrades.
+  archives to SQLite and forwards to DingTalk/webhook channels.
+  Local RPC uses a permission-restricted Unix socket, with no HTTP listener.
+  Configuration is stored in UCI; SMS history survives configuration-preserving upgrades.
 endef
 
 define Package/smsrelay/conffiles
 /etc/config/smsrelay
+endef
+
+define Package/luci-app-smsrelay
+  SECTION:=luci
+  CATEGORY:=LuCI
+  SUBMENU:=3. Applications
+  TITLE:=Native LuCI SMS gateway and MSM8916 controls
+  DEPENDS:=+smsrelay +luci-base +rpcd +rpcd-mod-file
+  PKGARCH:=all
+endef
+
+define Package/luci-app-smsrelay/conffiles
+/etc/config/jz02
 endef
 
 define Package/smsrelay/install
@@ -77,18 +83,29 @@ define Package/smsrelay/install
 
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) ./files/usr/bin/smsrelay-keepalive $(1)/usr/bin/smsrelay-keepalive
+	$(INSTALL_BIN) ./files/usr/bin/sms $(1)/usr/bin/sms
+	$(INSTALL_DIR) $(1)/usr/libexec/rpcd
+	$(INSTALL_BIN) ./files/usr/libexec/rpcd/smsrelay $(1)/usr/libexec/rpcd/smsrelay
+	$(INSTALL_DIR) $(1)/lib/upgrade
+	$(INSTALL_DATA) ./files/lib/upgrade/smsrelay.sh $(1)/lib/upgrade/smsrelay.sh
+	$(INSTALL_DIR) $(1)/etc/uci-defaults
+	$(INSTALL_BIN) ./files/etc/uci-defaults/90-smsrelay $(1)/etc/uci-defaults/90-smsrelay
+endef
 
-	# LuCI 菜单 / ACL / 视图（iframe 嵌 :8088 自带页面）
+define Package/luci-app-smsrelay/install
+	$(INSTALL_DIR) $(1)/etc/config $(1)/etc/init.d
+	$(INSTALL_CONF) ./files/etc/config/jz02 $(1)/etc/config/jz02
+	$(INSTALL_BIN) ./files/etc/init.d/jz02-power $(1)/etc/init.d/jz02-power
+	$(INSTALL_BIN) ./files/etc/init.d/jz02-led $(1)/etc/init.d/jz02-led
 	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d
 	$(INSTALL_DATA) ./files/usr/share/luci/menu.d/luci-app-smsrelay.json $(1)/usr/share/luci/menu.d/
 	$(INSTALL_DIR) $(1)/usr/share/rpcd/acl.d
 	$(INSTALL_DATA) ./files/usr/share/rpcd/acl.d/luci-app-smsrelay.json $(1)/usr/share/rpcd/acl.d/
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/smsrelay
-	$(INSTALL_DATA) ./files/www/luci-static/resources/view/smsrelay/index.js \
-		$(1)/www/luci-static/resources/view/smsrelay/index.js
-	$(INSTALL_DATA) ./files/www/luci-static/resources/view/smsrelay/config.js \
-		$(1)/www/luci-static/resources/view/smsrelay/config.js
+	$(INSTALL_DATA) ./files/www/luci-static/resources/view/smsrelay/*.js $(1)/www/luci-static/resources/view/smsrelay/
+	$(INSTALL_DATA) ./files/www/luci-static/resources/smsrelay.js $(1)/www/luci-static/resources/smsrelay.js
 endef
 
 $(eval $(call GoBinPackage,smsrelay))
 $(eval $(call BuildPackage,smsrelay))
+$(eval $(call BuildPackage,luci-app-smsrelay))

@@ -1,478 +1,166 @@
 # SMSRelay8916
 
-jz02v10（MSM8916 / 高通 410）随身 WiFi 的短信网关。收短信、归档、钉钉转发、Web 收发。
+MSM8916（jz02v10 / sp970v11）OpenWrt 短信网关：原生 LuCI、SQLite 收发记录、验证码提取、多通道转发、DDNS 和 LTE 保活。
 
-Go 重写版，替换早期 Python 实现（`/opt/sms-gw/sms-gw.py`）。API 与页面完全兼容，共用同一个 SQLite 归档库。
+- `main`：OpenWrt 主线。
+- `debian`：原 Debian 版本备份；systemd、独立网页及 HTTP API 的用法请查看该分支。
+- `openwrt`：旧兼容分支，不作为新版本发布入口。
 
-> 早期 Python 版已从设备上移除，运行期只依赖这一个静态二进制；`/usr/local/bin/sms` 命令行工具改为 `curl + jq`，**python3 也已从设备卸载**（需要时 `apt-get install python3` 装回即可）。
+## 界面
 
----
+进入 **LuCI → 服务 → 短信网关**，四个页签：
 
-## 为什么用 Go
+| 页签 | 内容 |
+|---|---|
+| 设置 | 基本参数、归档保留策略、转发通道、DDNS、LTE，以及原 `/system/jz02` 的调频和 LED 设置 |
+| 状态 | 逐核频率、CPU/基带温度、调频范围、模组/网络状态、短信统计和 DDNS 状态 |
+| 短信记录 | 收件箱、发件箱、搜索、分页、验证码复制、详情、删除、重试转发、手动发送 |
+| 日志 | 最近 500 条内存日志，级别/关键词筛选、暂停自动刷新、复制和下载 |
 
-这台设备的瓶颈不是内存，是**每 3 秒 spawn 一次 `mmcli`**。Python 版没有 D-Bus 绑定，只能轮询子进程，常驻 CPU 约 2%；Go 版订阅 ModemManager 的 D-Bus 信号（`Messaging.Added` / `Deleted`），空闲时完全不产生子进程。
-
-| 指标 | Python 版 | Go 版（实测） |
-|---|---|---|
-| 常驻内存 (RSS) | 38.3 MB | **13~15 MB** |
-| 空闲 CPU | 0.7~2%（每 3 秒轮询） | **0.2~1%**（取决于是否撞上 60 秒兜底扫描） |
-| 收取触发 | 每 3 秒轮询 | D-Bus 信号，实时 |
-| 短信入库延迟 | 8~12 秒 | **8~11 秒** |
-| 部署依赖 | python3 解释器 | 单个静态二进制 |
-| 二进制大小 | — | **11 MB**（arm64，静态链接，stripped） |
-
-内存绝对值差异在这台 371 MB 的机器上不算关键（`rmtfs` 占 47 MB、`NetworkManager` 20 MB），真正的收益是**事件驱动**和**部署干净**。
-
----
+状态页没有对应温度传感器时显示“暂无传感器”，不会使用 PMIC 温度代替 CPU 或基带温度。
+系统数据只在页面打开时采集；短信后台不再定时采样 CPU、温度或系统流量。
 
 ## 架构
 
-```
-        ┌──────────────── D-Bus（系统总线）────────────────┐
-        │  org.freedesktop.ModemManager1.Modem.Messaging   │
-        │  Added(o path, b received) / Deleted(o path)     │
-        └───────────────────────┬──────────────────────────┘
-                                │ 事件
-                     ┌──────────▼──────────┐
-                     │  events channel     │  串行 worker
-                     │  （容量 512，满则丢）│
-                     └──────────┬──────────┘
-                                │
-                ┌───────────────▼────────────────┐
-                │  process(path) 状态机           │
-                │  1. 读 mmcli -s <path> -J       │
-                │  2. 中间态 → 2 秒后重投          │
-                │  3. 正文须稳定 6 秒             │
-                │  4. 内容哈希去重 → SQLite       │
-                │  5. 确认入库后才删 modem 副本    │
-                └───────────────┬────────────────┘
-                                │
-        ┌───────────────────────┼────────────────────────┐
-        │                       │                        │
-   ┌────▼─────┐          ┌──────▼──────┐          ┌──────▼──────┐
-   │ SQLite   │          │ 转发 goroutine│          │ HTTP :8088  │
-   │ (WAL)    │          │ 钉钉（限流）  │          │ API + Web UI│
-   └──────────┘          └─────────────┘          └─────────────┘
-
-兜底：每 60 秒全量扫描一次对象列表，防止漏信号。
-```
-
-### 为什么数据读取还用 `mmcli` 而不是纯 D-Bus
-
-D-Bus 上的 `state` / `pdu-type` 是原始 `uint32` 枚举，需要自己维护映射表。**映射一旦搞错，就会把「接收中」误判成「已接收」，在长短信分片还没到齐时删掉对象 —— 永久丢短信（踩过）。**
-
-`mmcli -J` 输出的已经是字符串（`deliver` / `received` / `submitting`），这条路径经过长期实测。所以：
-
-- **事件通知**用 D-Bus（零轮询，这是性能收益来源）
-- **数据读取**用 `mmcli -J`（枚举无歧义，避免重新踩坑）
-
-代价是每条短信多一次 55ms 的子进程，但有事件才触发，空闲时为零。
-
----
-
-## 目录
-
-```
-cmd/smsrelay/main.go          入口、配置、事件循环、状态机、发送、转发
-internal/store/store.go       SQLite 归档（表结构与 Python 版一致）
-internal/otp/otp.go           验证码提取（纯函数，上下文优先 + 克制的兜底）
-internal/logbuf/logbuf.go     运行日志内存环形缓冲（Web 端查看，journal 仍负责持久化）
-internal/modem/modem.go       mmcli 封装 + 状态解析
-internal/modem/watch.go       D-Bus 信号订阅
-internal/relay/dingtalk.go    钉钉机器人（限流 + 重试）
-internal/api/api.go           HTTP API + 内置页面
-internal/api/web/index.html   Web UI（go:embed）
-deploy/                       部署用 systemd 单元与配置样例
-build.sh                      交叉编译（linux/arm64，静态）
-deploy.sh                     推送到设备并切换服务
-```
-
----
-
-## 构建
-
-在 WSL（Ubuntu 24.04）里：
-
-```bash
-cd ~/github/SMSRelay8916
-./build.sh                    # 交叉编译 linux/arm64 → dist/smsrelay-linux-arm64
-./build.sh --install-go       # 没装 Go 时先 apt 装
-./build.sh --host             # 编本机架构，便于在 x86 上调试逻辑
-```
-
-脚本会：
-
-1. 检查 Go ≥ 1.21
-2. 探测 `goproxy.cn` 直连是否可用；不通时才使用 `SMSRELAY_PROXY` 指定的代理（脚本**不内置任何代理地址**，`--no-proxy` 强制直连）
-3. 首次运行 `go get` 拉 `godbus/dbus/v5` 与 `modernc.org/sqlite`
-4. `CGO_ENABLED=1` + 系统 `libsqlite3`（`-tags libsqlite3`）
-
-sqlite 驱动用 `mattn/go-sqlite3`，构建时链 OpenWrt 的 `libsqlite3`（feeds 里的
-`libs/sqlite3`），而不是把 SQLite 编译进二进制：主程序小约 4.5MB，且与系统里其它
-用 sqlite 的程序共用同一份库。代价是必须用 OpenWrt 工具链编译（宿主机 gcc 编不出
-能在 musl 上跑的二进制），所以正式发版走 ipk，`openwrt/deploy.sh` 也要 `STAGING_DIR`。
-
-## 部署
-
-正式路径是 OpenWrt 包：
-
-```bash
-cp -a SMSRelay8916/openwrt package/smsrelay
-./scripts/feeds update packages && ./scripts/feeds install golang libsqlite3
-make package/smsrelay/compile V=99        # 产物在 bin/packages/*/base/
-```
-
-不重刷固件的快速迭代通道（需要构建树的 staging_dir）：
-
-```bash
-STAGING_DIR=$PWD/staging_dir ./openwrt/deploy.sh <设备IP> <密码>
-```
-
-脚本会：用工具链交叉编译（CGO）→ 检查设备有 `libsqlite3` → 上传二进制/init/UCI/LuCI →
-启用并启动服务。UCI 配置只在设备上还不存在时推送，不会覆盖已改过的值。
-
-## 配置
-
-配置的唯一来源是 UCI `/etc/config/smsrelay`，用 **LuCI → 服务 → 短信网关 → 设置**
-修改；`uci commit` 后 procd 按 reload trigger 自动重启服务。程序**只读**这个文件，
-不回写，所以不存在两个写入口互相覆盖的问题。
-
-```
-config smsrelay 'main'
-	option enabled '1'
-	option listen_host '0.0.0.0'
-	option listen_port '8088'
-	option api_token ''
-	option db_path '/etc/smsrelay/sms.db'
-	option retain_days '30'
-	option own_number ''
-	option bands ''
-	option operator ''
-
-config channel 'ch_ops'
-	option name '运维群'
-	option type 'dingtalk'
-	option url 'https://oapi.dingtalk.com/robot/send?access_token=...'
-	list body_line '{"text":"%s"}'
-
-config ddns 'd_home'
-	option name 'home.example.com'
-	option type 'A'
-	option api_token '...'
-	option source 'iface:wwan0'
-```
-
-- `api_token` 为空表示不鉴权；非空时需 `X-Token` 头或 `?token=`。
-  `scripts/sms` 用 `uci get` 自动读取，不用手工同步。
-- 通道/DDNS 的**段名是稳定主键**（`ch_ops`、`d_home`），库里按它记投递历史。
-  LuCI 生成的段名（`cfg0xxxx`）请勿手改，否则历史会对不上。
-- 多行模板用 `list body_line`，每行一项；正文占位符是 `%s`。
-- 请求头用 `list header 'K: V'`。
-- `bands` 留空表示不动模组频段（默认）。本机模组默认只开 `eutran-1/3/5`，
-  如果所在位置的移动小区在 band 8/39/40 上，就会出现「手机有信号、模组扫不到 46000」，
-  表现为注册不上、一直 searching。这时把支持的频段全填上，保活脚本会在基带就绪时
-  通过 `mmcli --set-current-bands` 设置一次（已在目标频段则跳过，不打断链路）。
-  下发的值会先与「本机模组 supported」求交集，所以**同一份配置可以跨机型共用**：
-  sp970 只支持 `egsm/dcs/pcs/g850/utran-1/5/eutran-1/3/5`，写全套也只会被裁到它支持的部分，
-  不会因为「不支持该频段」失败；交集为空时打一条 WARN 并跳过。
-
-  手写方式（也可在 LuCI「设置 → 模组频段」里填）：
-
-  ```
-  uci set smsrelay.main.bands='egsm|dcs|pcs|g850|utran-1|utran-2|utran-3|utran-5|utran-8|eutran-1|eutran-2|eutran-3|eutran-5|eutran-7|eutran-8|eutran-20|eutran-39|eutran-40'
-  uci commit smsrelay
-  ```
-
-- `operator` 用来锁定运营商（PLMN），值是本网 MCCMNC：移动 `46000`、联通 `46001`、
-  电信 `46011`；留空 = 自动选网。模组卡在别家网络（`mmcli` 里显示 `CHN-CT`、
-  `registration: searching` 那种）或一直 searching 时填它，保活脚本会在基带就绪后
-  `mmcli --3gpp-register-in-operator` 强制注册回本网。**已经在本网时不做任何动作**，
-  不会平白断链；开机/重启后 modem 还没注册完（mmcli 里连 `operator id` 行都没有）时
-  先等最多 3 轮（约 30s）让自动选网自己跑，避免每次重启都白断一次链；
-  失败重试 3 次后放弃并保留自动选网。
-
-  ```
-  uci set smsrelay.main.operator='46000'
-  uci commit smsrelay
-  ```
-
-## 运行期组件
-
-除了主程序，还有三个辅助件。它们的源码都在仓库里，`./deploy.sh` 会一起安装——
-不需要手工往设备上拷文件，改完脚本重新部署即可生效。
-
-| 组件 | 仓库文件 | 设备路径 | 作用 |
-|---|---|---|---|
-| 主程序 | `cmd/`（编译产物） | `/opt/smsrelay/smsrelay` | 收信 / 归档 / 转发 / HTTP |
-| LTE 保活+自愈 | `openwrt/files/usr/bin/smsrelay-keepalive` | `/usr/bin/smsrelay-keepalive` | 每 10 秒一个 ICMP（按 wwan0 的源地址发，绑设备名会假失败）避免空闲态丢寻呼；连续 3 次不通走 `ifdown/ifup modem` 重拨（5 分钟冷却）；基带未就绪时静默等待、不计失败次数；按 `bands` 配置设置模组频段，全程不碰 AT 口 |
-| 每日清理 | `scripts/smsrelay-maint.sh`<br>`deploy/smsrelay-maint.service`<br>`deploy/smsrelay-maint.timer` | `/usr/local/bin/smsrelay-maint.sh` | 每天 04:10 停 MM 独占 AT 口，清掉孤儿短信分片（纯 shell，不依赖 python3） |
-| 命令行 | `scripts/sms` | `/usr/local/bin/sms` | 只依赖 `curl` + `jq` |
-
-```bash
-sms status              # 号码 / 信号 / 收发统计 / 投递延迟
-sms list 20             # 最近 20 条
-sms send 10086 cxye     # 发送（超长自动拆分）
-sms fwd-test            # 向所有启用通道发测试消息
-```
-
-`deploy.sh` 装之前会先 `sh -n` 验语法——装一个跑不起来的清理脚本比不装更糟。
-设备上缺 `jq` 时只告警不中断，`sms` 命令届时不可用（`apt-get install jq` 即可）。
-
-数据只有一处：`/etc/smsrelay/sms.db`（overlay 持久；不要放 `/var`，那是 tmpfs）。
-
-| 路径 | 内容 | 升级后 |
-|---|---|---|
-| `/etc/config/smsrelay` | **全部配置**（启动参数、通道、DDNS），声明为 conffile | **保留** |
-| `/etc/smsrelay/sms.db` | 短信归档 + 投递记录 + DDNS 运行态 | 丢弃（可丢数据） |
-| `/var/log` | 运行日志（tmpfs） | 不保留 |
-
-### 升级（sysupgrade）的行为
-
-配置在 `/etc/config/` 下，`base-files` 的保留清单本来就覆盖它，所以**配置自动保留，
-不需要任何自定义 keep.d**。短信库不在保留清单里，升级时随 overlay 一起清空 ——
-这是刻意的：历史短信不需要跨版本带走，库坏了也直接删掉重建即可，不会影响服务启动。
-
-> 想要连短信一起带走的话，在 `/etc/sysupgrade.conf` 里加一行 `/etc/smsrelay/`，
-> 但要注意 sysupgrade 打包配置时服务还在跑，库是被热拷的。
-
-## 转发通道与模板
-
-通道在 LuCI 里配置（`/etc/config/smsrelay` 的 `config channel` 段），支持 `dingtalk`
-与 `webhook` 两种类型，可同时启用多条。每条通道的投递结果独立记账（
-`channel_deliveries` 表），一条失败不会让其它通道重推。API 的 `/api/channels` 只读，
-写入会返回 403 并提示去 LuCI 改。
-
-模板占位符（纯文本用不带后缀的，JSON 里用 `_json` 后缀）：
-
-| 占位符 | 含义 | `_json` 版本 |
-|---|---|---|
-| `{{own_number}}` | 本机号码（收信号码） | `{{own_number_json}}` |
-| `{{number}}` | 对方号码 | `{{number_json}}` |
-| `{{body}}` | 短信正文 | `{{body_json}}` |
-| `{{ts}}` | 时间 | `{{ts_json}}` |
-| `{{dir}}` | `in` / `out` | `{{dir_json}}` |
-| `{{id}}` | 归档记录 id | — |
-| `{{prefix}}` | 通道配置的前缀 | `{{prefix_json}}` |
-
-**`_json` 版本自带引号**，所以 JSON 模板里直接写 `"text": {{body_json}}`，
-不要再套一层引号（写成 `"text": "{{body_json}}"` 会得到双引号嵌套的非法 JSON）。
-
-钉钉通道的默认正文只有三行：发件人、短信正文、本机号码。正文里能提取到验证码时，
-验证码会以 `【验证码】发件人` 的形式提到第一行：
-
 ```text
-【499805】10086910
-（验证密码）499805，尊敬的用户，您的号码正在一个新设备上登录中国移动 APP，……
-手机号：13800000000
+原生 LuCI JavaScript
+      │ rpcd / ubus（读写 ACL 分离）
+      │ /usr/libexec/rpcd/smsrelay（按需执行，不常驻）
+      │ /usr/bin/smsrelay rpc call <固定白名单方法>
+      │ Unix Socket，目录 0700 / Socket 0600
+smsrelay（procd 管理）
+      ├─ ModemManager D-Bus 信号 + mmcli JSON：接收/发送
+      ├─ SQLite WAL：短信、发送队列、通道投递结果、DDNS 运行态
+      └─ 转发、保留策略、DDNS
 ```
 
-webhook 的正文模板留空时，使用下面这个合法 JSON 默认模板：
+**没有 TCP/HTTP 监听、8088 端口、iframe、独立网页或 PWA。**
+LuCI 的登录和 rpcd ACL 是唯一网页鉴权入口，旧 `listen_host/listen_port/api_token/web_dir` 配置已废弃。
+Cloudflare 记录自己的 `api_token` 不受影响。
+
+LTE 保活脚本继续作为 procd 的独立实例运行；它不直接访问 AT 口。
+JZ02 性能和指示灯脚本由 `luci-app-smsrelay` 包安装，不再由云编译仓库复制覆盖。
+
+## 构建与安装
+
+需要带 Go 1.26 工具链的 OpenWrt/ImmortalWrt 构建树或 SDK。
+SQLite 通过 CGO 链接目标系统 `libsqlite3`；不能用 `CGO_ENABLED=0` 或宿主机 gcc 生成可用的 OpenWrt 版本。
+
+在构建树根目录：
+
+```sh
+cp -a /path/to/SMSRelay8916/openwrt package/smsrelay
+./scripts/feeds update packages
+./scripts/feeds install golang libsqlite3
+# 在 package/smsrelay/Makefile 中将 PKG_SOURCE_VERSION 固定为本次已发布的提交。
+# 未提交代码可使用 OpenWrt 的本地源码覆盖机制测试，不能依赖远端下载。
+make menuconfig  # 同时选择 smsrelay 与 luci-app-smsrelay
+make package/smsrelay/compile V=99
+```
+
+同一个包目录生成两个软件包：
+
+- `smsrelay`：Go 后台、UCI、LTE 保活、本地 RPC 桥接和升级快照逻辑。
+- `luci-app-smsrelay`：四页签、权限、菜单、JZ02 配置及性能/LED 脚本，依赖 `smsrelay`。
+
+云编译项目 [MSM8916-OpenWrt-CI](https://github.com/zhoufla/MSM8916-OpenWrt-CI) 默认选择两个包，并将拉取到的 `main` 提交写入包 Makefile，保证包定义与 Go 源码一致。
+两个仓库的配套改动应一起发布后再构建固件。
+
+不重刷固件的开发部署：
+
+```sh
+STAGING_DIR=/path/to/openwrt/staging_dir \
+  SMSRELAY_SSH_PASS='<设备密码>' ./openwrt/deploy.sh <设备IP>
+```
+
+只在设备配置不存在时上传示例 UCI，不覆盖已有通道或凭据。
+正式发布建议安装软件包，而不是手工部署。
+
+## 配置与数据
+
+| 路径 | 用途 |
+|---|---|
+| `/etc/config/smsrelay` | 全部短信、转发、DDNS、保活配置 |
+| `/etc/config/jz02` | CPU 调频、频率上限、Wi-Fi 活动灯 |
+| `/etc/smsrelay/sms.db` | 持久短信归档、发送任务、通道投递结果、DDNS 状态 |
+| `/var/run/smsrelay/control.sock` | 仅本机可访问的 RPC Socket |
+
+配置只通过 UCI 修改，后台只读加载。短信配置提交后重启短信服务；JZ02 配置通过自己的 reload trigger 应用，不重启短信服务。
+没有硬件支持时隐藏对应设置。频段、运营商锁定留空时维持模组默认行为。
+
+短信保留天数默认 30，`0` 表示不自动清理；周期为 6 小时，设置页也可手动清理。
+排队中和发送中的记录不允许删除。删除短信会清理相关发送任务及投递数据，不留下孤立的正文副本。
+修改 `db_path` 不会自动搬迁原库；应先停服务，再迁移数据库及 WAL/SHM，或使用一致性备份。
+数据库及 Socket 均限制权限，备份压缩包包含私人短信，须妥善保管。
+
+### 升级与备份
+
+保留配置的 `sysupgrade` / `sysupgrade -b` 会调用 `/lib/upgrade/smsrelay.sh`：
+
+1. 真正刷写时先停短信服务，再通过 SQLite `VACUUM INTO` 生成包含已提交 WAL 数据的一致性快照；单独 `sysupgrade -b` 则在线备份调用瞬间的数据。
+2. 从备份清单排除活动 `.db/-wal/-shm`，只打包 `/etc/smsrelay/upgrade.db`。
+3. 新固件首次启动时校验快照；目标库不存在时恢复，并消费快照。
+4. 已存在的数据库（例如外接持久盘上的库或软件包重装）不会被旧快照覆盖。
+
+快照失败会阻止备份，不静默忽略。`sysupgrade -n`、清空 overlay、fastboot 直接重刷不保证保留数据。
+外接存储必须在恢复与服务启动前挂载；重要短信建议另做离机备份。
+数据库损坏时不会自动删库或更换为空库，保留原文件和模组中的短信，并在系统日志报告错误。
+
+从旧固件首次升级前，旧系统尚没有快照钩子，必须先离线备份：停短信服务，再完整备份数据库及可能存在的 WAL/SHM；不要只热拷 `.db`。
+
+### 可靠收发
+
+- 模组 ME/SIM 槽位有限，收到短信必须归档后释放，**只有确认入库才删除模组副本**。
+- 使用 `pdu 类型 + 号码 + 时间戳 + 正文` 去重，不单用可重复分配的 SMS 对象路径。
+- 长短信正文须稳定 6 秒才归档，不与 ModemManager 争用 AT 端口。
+- 手动发送先将请求及分段原子写入 SQLite，再由后台串行发送。
+- 同一个请求标识的重复提交返回原任务，不重复发送。
+- 未确认的发送结果显示“结果待确认”，不把超时当成功，不盲目自动重发；重启时同样保守处理。
+- 失败后重新编辑并确认发送；运营商可能收费，结果待确认时应先核实。
+
+### 转发模板
+
+Webhook / 钉钉支持多个通道，投递结果独立记录；重试跳过已经成功的通道。
+号码前缀、正文关键词、排除关键词、仅验证码等条件之间为“且”。
+UCI 段名是稳定主键，不要手动改名；浏览器操作使用段名，避免 int64 主键在 JavaScript 中丢失精度。
+
+模板支持 `{{own_number}}`、`{{number}}`、`{{body}}`、`{{code}}`、`{{ts}}`、`{{dir}}`、`{{id}}`、`{{prefix}}`。
+JSON 模板使用对应的 `_json` 占位符，它自带引号，例如：
 
 ```json
-{"own_number":{{own_number_json}},"from":{{number_json}},"text":{{body_json}},"ts":{{ts_json}},"id":{{id}},"dir":{{dir_json}}}
+{"from":{{number_json}},"text":{{body_json}},"code":{{code_json}}}
 ```
 
-## 安全与隐私
+## 本地 RPC 与日志
 
-这个仓库里**不含任何真实凭证或个人数据**，并且刻意做了以下约束：
+设备上可使用 ubus；调用返回 `{ "ok": true, "data": ... }` 或结构化错误：
 
-| 项 | 做法 |
-|---|---|
-| `/etc/config/smsrelay`（含 token、本机号码） | 设备本地配置，入库的是 `openwrt/files/` 下的**示例值**，不含真实凭证 |
-| 钉钉 / Cloudflare Token | 只出现在设备上的配置文件与数据库；接口返回一律脱敏成 `****1234` |
-| 设备地址、密码、代理 | 脚本不内置，全部通过参数或环境变量传入 |
-| 文档里的号码 / IP / IPv6 | 全部为占位值（`13800000000`、`192.168.1.100`、`203.0.113.10`、`2409:xxxx:...`） |
-
-部署到公网前请自行加固：设置 `api_token`、把 8088 只监听内网或套反向代理加 TLS、
-不要把 `/api/settings` 与 `/api/ddns` 直接暴露到公网（它们能读到脱敏后的 token 前缀与全部配置）。
-
-提交前跑一次自检（会同时扫工作区和全部 git 历史）：
-
-```bash
-make privacy
+```sh
+ubus call smsrelay status '{}'
+ubus call smsrelay messages '{"dir":"in","limit":30,"offset":0}'
+ubus call smsrelay logs '{"limit":100,"level":"warn"}'
 ```
 
-想让它自动拦截，把下面这行写进 `.git/hooks/pre-commit`：
+日志缓冲最多 500 条，进程重启即清空，支持 INFO/WARN/ERROR。
+配置中的密钥、URL 和长号码会在输出前脱敏；不记录短信正文。
+标准错误仍进入 OpenWrt `logd`，可通过 `logread -e smsrelay` 排查启动失败；是否跨重启保存由系统日志配置决定。
 
-```bash
-#!/bin/sh
-exec ./scripts/privacy-check.sh
+## 开发验证
+
+```sh
+go test ./...
+go test -race ./...
+go vet ./...
+git diff --check
 ```
 
-## HTTP API
+安装 Playwright 到独立测试目录后，可运行浏览器冒烟测试（不运行前端构建）：
 
-与 Python 版完全一致。
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/api/ping` | 存活检查 |
-| GET | `/api/status` | modem 状态、SIM、统计、寻呼延迟 |
-| GET | `/api/messages?limit=30&offset=0&dir=in&q=关键词&has_code=1` | 分页查询；`has_code=1` 只看提取到验证码的 |
-| POST | `/api/send` | `{"number":"10086","text":"cxye"}` |
-| POST | `/api/forward-test` | 钉钉连通性测试 |
-| POST | `/api/forward` | `{"id":N}` 重新入队 |
-| DELETE | `/api/messages/{id}` | 删除归档记录 |
-| POST | `/api/messages/batch-delete` | `{"ids":[1,2,3]}` 批量删除（≤1000），连带投递记录 |
-| POST | `/api/maintenance/cleanup` | 按当前 `retain_days` 立即清一次过期记录 |
-| GET | `/api/logs?limit=300&level=warn` | 内存环形缓冲里的运行日志（最多 500 条） |
-| GET | `/api/wifi/status` / `/api/wifi/scan` / `/api/wifi/saved` | Wi-Fi 状态 / 周边扫描 / 已保存网络 |
-| POST | `/api/wifi/connect` | `{ssid, password}` 连接（同步，最长 ~50s） |
-| DELETE | `/api/wifi/saved/{name}` | 忘记网络；当前连接返回 409 |
-
-### Wi-Fi 管理
-
-设置页「Wi-Fi」区可扫描、连接（密码走界面输入）、忘记已保存网络。防自锁设计：
-活跃连接的 profile 禁止删除；连接失败 NM 自动回连原网络；短信走 LTE 不受影响。
-实现是 nmcli 封装（`internal/wifi`），固定 `LC_ALL=C` 解析，SSID/密码只走 argv。
-
-### 转发规则路由
-
-每个通道可设条件（全部为空 = 接收所有，向后兼容）：对端号码**前缀**、正文关键词、
-排除关键词、仅验证码。非空条件 AND 组合，条件内逗号分隔任一命中。所有通道都不匹配 =
-消息标记已转发（无事可做）。通道测试（fwd-test）始终旁路条件。
-
-### PWA
-
-页面带 manifest 与图标（AI 生成，512/192）。iOS Safari「添加到主屏幕」完整可用；
-Android 在 HTTP 下只能创建快捷方式，上 HTTPS 后自动升级为完整 PWA（本轮不做 HTTPS）。
-
-### 验证码提取
-
-入站短信归档时自动提取验证码（`internal/otp`），支持连续的 **4–8 位半角数字或字母数字混合串**，
-保留原始大小写与前导零。不支持纯字母、全角字符、`123 456` / `123-456` 等分组格式。
-
-识别分三层，英文关键词不区分大小写且须为完整单词：
-
-1. 明确关键词：验证码、校验码、确认码、动态码、动态密码、动态口令、一次性密码、一次性口令、
-   登录码、登陆码、注册码、安全码、授权码，以及 verification/authentication/security/confirmation/login/authorization code、
-   one-time code/password（也支持 one time 写法）、passcode、OTP。关键词可在候选前后，间隔最多 24 个字符且不能夹其他数字。
-2. 明确赋值句式：`code: 123456`、`code is A1B2C3`、`123456 is your code`，间隔最多 24 个字符。
-3. 受限兜底：仅纯数字，须在「验证」「校验」或上述明确英文关键词前后 64 个字符内。
-
-各层关联均不能跨越 `。！？!?；;`，最多跨一个换行，距离按 Unicode 字符计算。
-统一排除打码片段、URL、邮箱、分组数字、明显的日期时间与金额，以及紧随手机号、电话、尾号、
-订单号、流水号、运单号、取件码、提货码、券码、优惠码、错误码等标签的内容；不从长编号中截取。
-在最高有效层级按原始值去重：只有一个值才返回，不同值并列则不提取，不按出现位置强行选择。
-没有验证上下文时不识别；裸 `code` 不触发兜底，`验证码：2026` 则仍是有效验证码。
-
-提取结果用于：列表高亮与一键复制、钉钉默认模板首行
-`【xxxx】发件人`（正文没有验证码时模板不变）、SSE 事件与 CLI `sms code`。自定义 webhook
-模板可用 `{{code}}` / `{{code_json}}`。
-短信原文完整保留。启动时仍只对验证码为空的历史入站记录尝试回填，不重新计算已有非空结果。
-
-### 归档保留策略
-
-设置页「归档保留天数」（`retain_days`，0–3650，0 或留空 = 关闭）。开启后每 6 小时
-删除超过天数的归档记录及其通道投递记录，删完截断 WAL（设备只有 3.3GB eMMC）。
-设置页有「立即清理」按钮。`maint.sh` 保持 modem 侧单一职责，不参与。
-
-### 日志查看
-
-进程内 500 条环形缓冲（`internal/logbuf`）挂在 `log` 输出后，Web「日志」Tab 查看，
-支持 WARN 过滤。重启即清空，完整历史仍在设备上 `journalctl -u smsrelay`。
-
----
-
-## 关键设计决策（都是踩过的坑，改代码前先读）
-
-### 1. 短信存储只有 73 个槽位，满了会静默丢短信
-
-```
-AT+CPMS?  →  "ME",0,23  "SM",0,50
+```sh
+PLAYWRIGHT_MODULE=/path/to/playwright node scripts/test-luci.cjs
 ```
 
-modem `ME` 23 条 + SIM `SM` 50 条，在通信处理器里写死，**无法扩容**。槽满后短信中心直接丢弃新短信，不报错也收不到。
+测试使用真实页面模块，但 RPC、sysfs、LuCI 表单和主题为替身；默认截图位于 `/tmp/opencode/smsrelay-status-preview.png`，不代表真机效果。
 
-所以必须「收到即取走」：归档 → 立即删 modem 副本 → 槽位永远空着。这是整个程序的核心约束。
-
-### 2. 绝不能用 SMS 对象路径做幂等键
-
-ModemManager **回收复用**对象路径：删掉 `SMS/3` 后，下一条新短信还会被命名成 `SMS/3`。
-
-早期实现用 `mm_path` 判重，于是新短信被误判为「已记录」，跳过入库却照样删除对象 —— **消息静默销毁，库里连痕迹都没有**。
-
-现在身份只由 `sha1(pdu类型|号码|时间戳|正文)` 决定，`mm_path` 仅作记录。
-
-### 3. 只有确认入库才允许删除
-
-`Archive()` 返回 `true` 才调 `Delete()`。失败就打 WARN 留在原处，5 秒后重试。
-
-结构上杜绝「删了但没存」。
-
-### 4. 长短信分片未到齐时不能取走
-
-长短信是多条 PDU 陆续到达，MM 拼进同一个 SMS 对象。若在一片刚到、下一片还在路上时删掉对象，剩下一片会留在 SIM 里变成孤儿，之后短信中心复用相同分片序号就撞车（MM 日志：`A part with index 1 was already taken`），整条永久丢失。
-
-两道闸：
-
-- 状态是 `sending` / `receiving` / `draft` / `unknown` / 空 / `--` → 一律跳过，最多等 30 秒兜底
-- 正文必须**稳定 6 秒**（`holdSeconds`）才归档
-
-### 5. 绝不直接打开 `/dev/wwan0atN`
-
-ModemManager 自己就是用 `wwan0at1` 下发 `AT+CMGR` 把 `+CMTI` 通知变成短信对象的。任何外部程序去同一个口发 AT（哪怕只是 `AT+CPMS?`）都会打断它的会话。
-
-现象极其迷惑：**`+CMTI` 照常到达、短信也确实在 SIM 里，但永远不变成 SMS 对象 —— 表现为「收不到短信」**。
-
-本程序完全不碰 AT 端口。要看存储占用必须先 `systemctl stop ModemManager`。
-
-### 6. 发送正文必须走临时文件
-
-`mmcli --messaging-create-sms` 用逗号分隔 `key=value`，正文里只要有逗号就把参数解析炸掉，换行和引号也不可靠。
-
-必须：`--messaging-create-sms=number=X` + `--messaging-create-sms-with-text=<临时文件>`。
-
-### 7. systemd 单元不能依赖 `network-online.target`
-
-设备有 wlan0 + wwan0 双默认路由，`NetworkManager-wait-online` 会长期不返回，导致服务开机被无限期排队。
-
-只 `After=ModemManager.service`。
-
-### 8. 别频繁重启 ModemManager
-
-每次重启都会丢 SGs 关联，之后几分钟的短信全要排队重投。诊断时优先用 D-Bus 监听（`gdbus monitor`），不要重启服务。
-
-### 9. 空闲态收不到短信（机型固有限制）
-
-这台 MSM8916 + 2015 年 MPSS 固件在 LTE 空闲态（ECM-IDLE）下收不到网络寻呼。别人随机时间发来的短信可能延迟几分钟，直到设备因其它原因重新附着才补投。
-
-`AT+CREG: 0,1` 显示 CS 域已注册，但空闲寻呼实际打不到，属固件/网络侧行为，软件改不动根因，只能缓解：`smsrelay-keepalive`（procd 的 keepalive 实例）每 10 秒 ping 一次，维持连接活跃（约 0.5 MB/天）。
-
-`/api/status` 的 `paging_24h` 字段用于观察缓解效果：`slow_count`（延迟 > 60s 的条数）应为 0。
-
----
-
-## 已知限制
-
-- 单进程单实例，SQLite 用 WAL，并发写靠 `busy_timeout`
-- 钉钉机器人限流 20 条/分钟，程序按 `max_per_min`（默认 15）节流
-- 只处理文本短信；数据短信（`data`）归档为 `[非文本内容]`
-- 发送状态轮询最长 45 秒，超时按「已发送」处理
-
-## 实测记录（2026-10-31，jz02v10）
-
-部署后逐项验证：
-
-| 项 | 结果 |
-|---|---|
-| 交叉编译 | `aarch64` 静态二进制 11 MB，`go vet` 零告警 |
-| 冷启动 | 服务自启，p12/归档库/归档记录全部保留 |
-| 发送（含逗号+换行） | 1 秒完成，`state: sent`，正文原样保留 |
-| 超长拆分 | 124 字符 → 2 条，带 `(1/2)(2/2)` 标记，均 sent |
-| 入站收取 | 10~22 秒入库，长回复 283 字完整重组 |
-| 钉钉转发 | `forwarded #N`，旧记录 `fw=1` |
-| 槽位释放 | 每轮结束 `No sms messages were found` |
-| 重启恢复 | uptime 48s 时服务已 active、modem connected |
-| 空闲资源 | RSS 13~15 MB，CPU 0.2~1% |
-
-关于 CPU：同一套代码在不同采样窗口会在 0.2%~1% 之间波动，差异主要来自是否撞上
-每 60 秒一次的兜底扫描（每次 spawn 一个 `mmcli`，约 55 ms）。试过 `GOMAXPROCS=1`
-与 `GOGC=200`，**都没有稳定改善**（同一配置重复测量噪声大于差异），因此不做这类调优。
-
-还可以进一步压低：把 `guard_interval` 从 60 调到 300，CPU 会降到 0.2% 左右，
-代价是漏信号时最坏恢复时间从 1 分钟变成 5 分钟。当前保持 60 秒，优先保证及时性。
-
-
-## 许可
-
-内部使用。
+覆盖原有 OTP/转发/存储测试以及本地 RPC、发送请求幂等、恢复策略和 WAL 在线快照。
+LuCI/rpcd 权限、跨架构打包、实际收发、温度探测及 sysupgrade 完整流程仍需在对应 OpenWrt 设备验证。

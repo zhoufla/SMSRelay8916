@@ -27,15 +27,11 @@ type Config struct {
 
 	Enabled       bool
 	Keepalive     bool
-	ListenHost    string
-	ListenPort    int
-	APIToken      string
 	DBPath        string
 	RetainDays    int
 	OwnNumber     string
 	GuardInterval int
 	ModemIndex    string
-	WebDir        string
 
 	Channels []forward.Channel
 	DDNS     []ddns.Record
@@ -57,36 +53,26 @@ func Load(path string) (*Config, error) {
 		Source:        path,
 		Enabled:       true,
 		Keepalive:     true,
-		ListenHost:    "0.0.0.0",
-		ListenPort:    8088,
 		DBPath:        "/etc/smsrelay/sms.db",
 		RetainDays:    30,
 		GuardInterval: 60,
 		ModemIndex:    "0",
-		// 默认用编译进二进制的内置页面；web_dir 只用于本地调试时挂外部目录
-		WebDir: "",
 	}
 
 	main := f.First("smsrelay")
 	if main == nil {
 		// 兼容旧版配置：早期 init 渲染 config.json 时用的是 `config main 'main'`。
-		// 不认这个段类型的话，升级后 api_token / own_number / db_path 会全部退回
-		// 默认值 —— 其中 api_token 变空等于把 Web 界面变成无鉴权，属于安全事故，
-		// 所以这里必须回退，不能只认新段名。
+		// 不认这个段类型会让 own_number / db_path 退回默认值，必须兼容读取。
 		main = f.First("main")
 	}
 	if main != nil {
 		c.Enabled = boolOpt(main, "enabled", true)
 		c.Keepalive = boolOpt(main, "keepalive", true)
-		c.ListenHost = strOpt(main, "listen_host", c.ListenHost)
-		c.ListenPort = intOpt(main, "listen_port", c.ListenPort)
-		c.APIToken = main.Get("api_token")
 		c.DBPath = strOpt(main, "db_path", c.DBPath)
 		c.RetainDays = intOpt(main, "retain_days", c.RetainDays)
 		c.OwnNumber = main.Get("own_number")
 		c.GuardInterval = intOpt(main, "guard_interval", c.GuardInterval)
 		c.ModemIndex = strOpt(main, "modem_index", c.ModemIndex)
-		c.WebDir = strOpt(main, "web_dir", c.WebDir)
 	}
 
 	for i, s := range f.SectionsOf("channel") {
@@ -100,10 +86,6 @@ func Load(path string) (*Config, error) {
 		c.DDNS = append(c.DDNS, parseDDNS(s))
 	}
 
-	if c.ListenPort <= 0 || c.ListenPort > 65535 {
-		c.Warnings = append(c.Warnings, fmt.Sprintf("listen_port=%d 非法，回退 8088", c.ListenPort))
-		c.ListenPort = 8088
-	}
 	if c.GuardInterval <= 0 {
 		c.GuardInterval = 60
 	}

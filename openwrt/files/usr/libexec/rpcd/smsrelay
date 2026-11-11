@@ -1,0 +1,3 @@
+#!/bin/sh
+# 参数和正文通过 stdin 进入 Go JSON 解码器，不拼接 shell 命令。
+exec /usr/bin/smsrelay rpc "$@"

@@ -2,6 +2,9 @@
 'require view';
 'require form';
 'require uci';
+'require fs';
+'require ui';
+'require smsrelay';
 
 /*
  * smsrelay 配置页（原生 LuCI 表单）
@@ -16,12 +19,17 @@
 
 return view.extend({
 	load: function() {
-		return uci.load('smsrelay');
+		return Promise.all([
+			uci.load('smsrelay'), uci.load('jz02'),
+			fs.read('/sys/devices/system/cpu/cpufreq/policy0/scaling_available_frequencies').catch(function() { return ''; }),
+			fs.read('/sys/devices/system/cpu/cpufreq/policy0/scaling_available_governors').catch(function() { return ''; }),
+			fs.read('/sys/class/leds/green:wlan/brightness').then(function() { return true; }).catch(function() { return false; })
+		]);
 	},
 
-	render: function() {
+	render: function(data) {
 		var m = new form.Map('smsrelay', _('短信网关'),
-			_('配置保存在 /etc/config/smsrelay，保存后服务会自动重启。短信归档与日志不在本页，见「短信记录」。'));
+			_('短信历史保存在 SQLite，收发及转发不依赖浏览器。短信设置保存并应用后会重启后台；发送中请等待完成再修改。性能与指示灯设置独立应用。'));
 
 		/* ---------------- 基本设置 ---------------- */
 		var s = m.section(form.NamedSection, 'main', 'smsrelay', _('基本设置'));
@@ -39,19 +47,6 @@ return view.extend({
 		o.rmempty = false;
 		o.forcewrite = true;
 
-		o = s.option(form.Value, 'listen_host', _('监听地址'));
-		o.datatype = 'ipaddr';
-		o.placeholder = '0.0.0.0';
-
-		o = s.option(form.Value, 'listen_port', _('监听端口'));
-		o.datatype = 'port';
-		o.placeholder = '8088';
-
-		o = s.option(form.Value, 'api_token', _('接口口令'),
-			_('留空表示不鉴权。设置后 API 与内置页面都需要带这个口令。'));
-		o.password = true;
-		o.rmempty = true;
-
 		o = s.option(form.Value, 'own_number', _('本机号码'),
 			_('留空则跟随 SIM 卡；很多卡不写号码，转发内容里会缺「收信号码」'));
 		o.rmempty = true;
@@ -63,11 +58,12 @@ return view.extend({
 
 		o = s.option(form.Value, 'guard_interval', _('兜底扫描间隔（秒）'),
 			_('漏掉 D-Bus 信号时，最坏多久能补收'));
-		o.datatype = 'uinteger';
+		o.datatype = 'min(1)';
 		o.placeholder = '60';
 
 		o = s.option(form.Value, 'modem_index', _('Modem 编号'));
 		o.placeholder = '0';
+		o.datatype = 'uinteger';
 
 		o = s.option(form.Value, 'bands', _('模组频段'),
 			_('可选。留空 = 不改动模组默认频段。竖线或逗号分隔 mmcli 频段名，' +
@@ -87,8 +83,23 @@ return view.extend({
 		o.rmempty = true;
 
 		o = s.option(form.Value, 'db_path', _('归档库路径'),
-			_('别放 /var（tmpfs，重启即丢）'));
+			_('默认 /etc/smsrelay/sms.db。升级保留配置时创建一致性备份；不要放 /tmp 或 /var。更改路径不会自动搬迁旧库，请先停服务迁移。'));
 		o.placeholder = '/etc/smsrelay/sms.db';
+		o.validate = function(sid, value) {
+			return /^\/[A-Za-z0-9_./-]+$/.test(value) && value.indexOf('//') < 0 && !/\/\.{1,2}(\/|$)/.test(value) && value !== '/etc/smsrelay/upgrade.db' && !/^\/(tmp|var|proc|sys|dev)(\/|$)/.test(value)
+				? true : _('请输入持久存储上的绝对路径，不允许空格、上级目录或临时目录');
+		};
+		o = s.option(form.Button, '_cleanup', _('清理过期短信'));
+		o.inputtitle = _('立即清理');
+		o.onclick = function() {
+			ui.showModal(_('清理过期短信'), [ E('p', {}, _('按已保存的保留天数清理，0 表示不清理。确认继续？')),
+				E('div', { 'class': 'right' }, [ E('button', { 'class': 'btn', 'click': ui.hideModal }, _('取消')), ' ',
+					E('button', { 'class': 'btn cbi-button-negative', 'click': ui.createHandlerFn(this, function() {
+						return smsrelay.call('cleanup').then(function(r) {
+							ui.hideModal(); ui.addNotification(null, E('p', {}, _('已删除 %d 条记录').format(r.deleted)), 'info');
+						}).catch(smsrelay.error);
+					}) }, _('确认')) ]) ]);
+		};
 
 		/* ---------------- 转发通道 ---------------- */
 		var cs = m.section(form.GridSection, 'channel', _('转发通道'),
@@ -162,6 +173,13 @@ return view.extend({
 
 		o = cs.option(form.Flag, 'match_code_only', _('仅验证码短信'));
 		o.modalonly = true;
+		o = cs.option(form.Button, '_test', _('连通性测试'));
+		o.inputtitle = _('测试已保存配置');
+		o.onclick = function(ev, sid) {
+			return smsrelay.run('test_channel', sid).then(function() {
+				ui.addNotification(null, E('p', {}, _('测试成功')), 'info');
+			}).catch(smsrelay.error);
+		};
 
 		/* ---------------- DDNS ---------------- */
 		var ds = m.section(form.GridSection, 'ddns', _('DDNS'),
@@ -212,6 +230,33 @@ return view.extend({
 		o.placeholder = '1';
 		o.modalonly = true;
 
-		return m.render();
+		o = ds.option(form.Button, '_sync', _('手动同步'));
+		o.inputtitle = _('同步已保存配置');
+		o.onclick = function(ev, sid) {
+			return smsrelay.run('sync_ddns', sid).then(function(r) {
+				ui.addNotification(null, E('p', {}, r.message || _('同步完成')), 'info');
+			}).catch(smsrelay.error);
+		};
+
+		var maps = [ m ];
+		if (data[2].trim() || data[4]) {
+			var perf = new form.Map('jz02', _('性能与指示灯'), _('设置独立保存在 /etc/config/jz02；修改不会重启短信服务。'));
+			var ps = perf.section(form.NamedSection, 'system', 'jz02');
+			ps.anonymous = true;
+			if (data[2].trim()) {
+				o = ps.option(form.ListValue, 'cpu_governor', _('调频策略'));
+				data[3].trim().split(/\s+/).filter(Boolean).forEach(function(g) { o.value(g); });
+				o.rmempty = false;
+				o = ps.option(form.ListValue, 'cpu_max_freq', _('最高频率'));
+				data[2].trim().split(/\s+/).filter(Boolean).forEach(function(f) { o.value(f, (parseInt(f, 10) / 1000) + ' MHz'); });
+				o.rmempty = false;
+			}
+			if (data[4]) {
+				o = ps.option(form.Flag, 'led_wifi', _('绿灯显示 Wi-Fi 活动'));
+				o.default = '0'; o.rmempty = false;
+			}
+			maps.push(perf);
+		}
+		return Promise.all(maps.map(function(map) { return map.render(); })).then(function(nodes) { return E('div', {}, nodes); });
 	}
 });

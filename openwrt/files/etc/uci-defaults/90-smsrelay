@@ -1,0 +1,33 @@
+#!/bin/sh
+# 原位保留旧配置；只迁移段类型和已废弃的 HTTP 选项。
+if [ "$(uci -q get smsrelay.main)" = main ]; then
+	uci set smsrelay.main=smsrelay
+fi
+for key in listen_host listen_port api_token web_dir; do
+	uci -q delete "smsrelay.main.$key"
+done
+uci -q commit smsrelay
+
+# 仅首次启动/安装时恢复，普通重启不消费 sysupgrade -b 留下的快照。
+if [ -f /etc/smsrelay/upgrade.db ]; then
+	db="$(uci -q get smsrelay.main.db_path)"
+	[ -n "$db" ] || db=/etc/smsrelay/sms.db
+	if [ ! -e "$db" ]; then
+		/etc/init.d/smsrelay stop
+		/usr/bin/smsrelay restore || exit 1
+	else
+		# 手动 sysupgrade -b 或软件包重装留下的旧快照，不能覆盖现存库。
+		rm -f /etc/smsrelay/upgrade.db
+	fi
+fi
+
+# 固件旧覆盖层中可能残留旧入口，移除固定路径，不动其他应用。
+rm -f /usr/share/luci/menu.d/luci-app-jz02.json \
+	/usr/share/rpcd/acl.d/luci-app-jz02.json \
+	/www/luci-static/resources/view/jz02/settings.js \
+	/www/luci-static/resources/view/smsrelay/index.js
+
+for service in smsrelay jz02-power jz02-led; do
+	[ -x "/etc/init.d/$service" ] && "/etc/init.d/$service" enable
+done
+exit 0

@@ -52,7 +52,7 @@ func TestLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("加载失败: %v", err)
 	}
-	if !c.Enabled || c.ListenPort != 9088 || c.APIToken != "secret-token" {
+	if !c.Enabled {
 		t.Fatalf("main 解析错误: %+v", c)
 	}
 	if c.RetainDays != 7 || c.OwnNumber != "13800138000" {
@@ -103,7 +103,7 @@ func TestLoadMissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("缺失文件不应报错: %v", err)
 	}
-	if c.ListenPort != 8088 || c.DBPath != "/etc/smsrelay/sms.db" {
+	if c.DBPath != "/etc/smsrelay/sms.db" {
 		t.Fatalf("默认值不对: %+v", c)
 	}
 }
@@ -121,7 +121,7 @@ func TestChannelWithoutURLWarns(t *testing.T) {
 }
 
 // 旧固件里的段类型是 `config main 'main'`（那时只渲染 config.json）。
-// 升级后必须还能认出来：否则 api_token 退回空值，Web 界面变成无鉴权。
+// 升级后必须还能读出原数据库路径、本机号码和扫描间隔。
 func TestLoadLegacyMainSection(t *testing.T) {
 	const legacy = `
 config main 'main'
@@ -137,9 +137,6 @@ config main 'main'
 	c, err := Load(writeTemp(t, legacy))
 	if err != nil {
 		t.Fatalf("加载旧版配置失败: %v", err)
-	}
-	if c.APIToken != "legacy-token" {
-		t.Fatalf("旧段类型的 api_token 丢了（会导致无鉴权）: %q", c.APIToken)
 	}
 	if c.OwnNumber != "13900139000" || c.GuardInterval != 90 {
 		t.Fatalf("旧段类型其余字段解析错误: %+v", c)

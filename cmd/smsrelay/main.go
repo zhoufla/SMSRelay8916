@@ -10,37 +10,34 @@
 //   - 发：正文写入临时文件后走 --messaging-create-sms-with-text，
 //     彻底避开 mmcli 对逗号/换行的转义问题。
 //   - 转发：SQLite 里的转发队列 + 独立 goroutine，网络抖动不影响收取。
-//   - 对外：HTTP API + 内置单页 Web UI，接口与既有 Python 版完全兼容。
+//   - 界面：原生 LuCI 经 rpcd 与本地 Unix Socket 通信，不监听 TCP。
 package main
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf16"
 
 	"github.com/zhoufla/SMSRelay8916/internal/api"
 	"github.com/zhoufla/SMSRelay8916/internal/config"
 	"github.com/zhoufla/SMSRelay8916/internal/ddns"
-	"github.com/zhoufla/SMSRelay8916/internal/eventbus"
 	"github.com/zhoufla/SMSRelay8916/internal/forward"
+	"github.com/zhoufla/SMSRelay8916/internal/localrpc"
 	"github.com/zhoufla/SMSRelay8916/internal/logbuf"
 	"github.com/zhoufla/SMSRelay8916/internal/modem"
 	"github.com/zhoufla/SMSRelay8916/internal/otp"
 	"github.com/zhoufla/SMSRelay8916/internal/store"
-	"github.com/zhoufla/SMSRelay8916/internal/sysinfo"
 )
 
 // Version 是构建版本，编译时可通过 -ldflags "-X main.Version=..." 覆盖。
@@ -80,23 +77,6 @@ var pendingStates = map[string]bool{
 
 // Config 由 internal/config 从 UCI 解析，这里不再保留第二份定义。
 
-// detectNetIfaces 返回要统计流量的网卡。
-// OpenWrt(netifd) 的 STA 接口名是 phy0-sta0，Debian(NetworkManager) 是 wlan0；
-// 按存在性探测，两边都能跑，缺哪个就跳过。
-func detectNetIfaces() []string {
-	cands := []string{"phy0-sta0", "wlan0", "wwan0"}
-	out := make([]string, 0, len(cands))
-	for _, n := range cands {
-		if _, err := net.InterfaceByName(n); err == nil {
-			out = append(out, n)
-		}
-	}
-	if len(out) == 0 {
-		out = []string{"wwan0"}
-	}
-	return out
-}
-
 // smsState 记录一个 SMS 对象在本进程内的观察历史。
 type smsState struct {
 	firstSeen  time.Time // 首次看到该对象的时间，用于 pending 超时兜底
@@ -105,7 +85,7 @@ type smsState struct {
 	failures   int // 连续读取失败次数，用于指数退避与放弃判定
 }
 
-// App 把各组件装配在一起，并实现 api.Backend。
+// App 装配短信业务、本地 RPC 和持久发送队列。
 //
 // 配置（含通道、DDNS）全部来自 UCI，进程内只读：改配置走 LuCI，
 // uci commit 触发 procd reload，服务重启后读到新值。程序不写配置，
@@ -116,8 +96,6 @@ type App struct {
 	modem    *modem.Client
 	sender   *forward.Sender
 	cf       *ddns.Client
-	sys      *sysinfo.Collector
-	bus      *eventbus.Bus
 	logs     *logbuf.Buffer // 运行日志环形缓冲，供 /api/logs 查看
 	startTS  time.Time
 	hostname string
@@ -127,10 +105,26 @@ type App struct {
 	mu     sync.Mutex // 保护 states
 	states map[string]*smsState
 
-	sendMu sync.Mutex // 发送串行化，避免多路并发挤爆 modem
+	activeMu      sync.Mutex
+	activePaths   map[string]bool
+	statusMu      sync.Mutex
+	modemStatus   *modem.Status
+	statusAt      time.Time
+	operationMu   sync.Mutex
+	operations    map[string]*operation
+	operationSeq  int
+	operationBusy bool
 }
 
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "backup" || os.Args[1] == "restore") {
+		databaseCommand(os.Args[1])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "rpc" {
+		runRPC(os.Args[2:])
+		return
+	}
 	var (
 		configFlag = flag.String("config", config.DefaultPath, "UCI 配置路径")
 		checkFlag  = flag.Bool("check", false, "仅校验配置与依赖，不启动服务")
@@ -139,7 +133,7 @@ func main() {
 	)
 	flag.Parse()
 	log.SetFlags(log.LstdFlags)
-	// stderr 进 journald；内存环形缓冲给 Web 界面看，容量固定自动淘汰
+	// stderr 进入 OpenWrt logd；内存环形缓冲供 LuCI 日志页查看。
 	ring := logbuf.New(500)
 	log.SetOutput(io.MultiWriter(os.Stderr, ring))
 
@@ -152,6 +146,19 @@ func main() {
 	if err != nil {
 		log.Fatalf("读取配置失败: %v", err)
 	}
+	secrets := []string{}
+	for _, ch := range cfg.Channels {
+		secrets = append(secrets, ch.Config.Secret, ch.Config.URL)
+		for _, v := range ch.Config.Headers {
+			if len(v) > 8 {
+				secrets = append(secrets, v)
+			}
+		}
+	}
+	for _, r := range cfg.DDNS {
+		secrets = append(secrets, r.APIToken)
+	}
+	log.SetOutput(logbuf.RedactingWriter(io.MultiWriter(os.Stderr, ring), secrets))
 	log.Printf("配置: %s（通道 %d 个、DDNS %d 条）", cfg.Source, len(cfg.Channels), len(cfg.DDNS))
 	for _, w := range cfg.Warnings {
 		log.Printf("WARN %s", w)
@@ -166,35 +173,34 @@ func main() {
 		log.Printf("UCI 里 enabled=0，服务不启动")
 		return
 	}
+	// 先占用单实例 Socket，再恢复发送队列，避免第二个进程改动活跃任务。
+	var listener net.Listener
+	if !*checkFlag {
+		listener, err = localrpc.Listen(localrpc.Socket)
+		if err != nil {
+			log.Fatalf("本地 RPC 启动失败: %v", err)
+		}
+		defer listener.Close()
+	}
 
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
-		// 归档库是"可丢数据"：坏了就改名留证后重建，不让一个字节毁掉整个网关。
-		// 配置在 UCI 里，重建后照常工作，只是历史短信没了。
-		log.Printf("ERROR 归档库无法打开（%v），改名留证后重建", err)
-		if rerr := setAsideBrokenDB(cfg.DBPath); rerr != nil {
-			log.Fatalf("清理损坏的归档库失败: %v", rerr)
-		}
-		if st, err = store.Open(cfg.DBPath); err != nil {
-			log.Fatalf("重建归档库失败: %v", err)
-		}
+		log.Fatalf("ERROR 归档库无法打开，保留数据库与模组短信，请检查存储: %v", err)
 	}
 	defer st.Close()
 	log.Printf("归档库: %s", cfg.DBPath)
 
 	hostname, _ := os.Hostname()
-	bus := eventbus.New()
 	app := &App{
-		cfg:      cfg,
-		store:    st,
-		modem:    modem.New(cfg.ModemIndex),
-		sys:      sysinfo.New(detectNetIfaces()...),
-		bus:      bus,
-		logs:     ring,
-		startTS:  time.Now(),
-		hostname: hostname,
-		events:   make(chan string, 512),
-		states:   make(map[string]*smsState),
+		cfg:         cfg,
+		store:       st,
+		modem:       modem.New(cfg.ModemIndex),
+		logs:        ring,
+		startTS:     time.Now(),
+		hostname:    hostname,
+		events:      make(chan string, 512),
+		states:      make(map[string]*smsState),
+		activePaths: make(map[string]bool),
 	}
 	app.sender = forward.NewSender()
 	app.cf = ddns.NewClient()
@@ -225,13 +231,9 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 0) 系统指标采样：5 秒一次，结果缓存，并推送给 SSE 订阅者
-	go app.sys.Start(ctx, 5*time.Second, func(s *sysinfo.Snapshot) {
-		app.bus.Publish("system", s)
-	})
-
-	// 0b) modem 状态巡检：60 秒一次，只在关键字段变化时推送
-	go app.modemWatch(ctx, 60*time.Second)
+	if err := st.RecoverSendTasks(); err != nil {
+		log.Fatalf("恢复发送队列失败: %v", err)
+	}
 
 	// 1) 事件处理 worker（串行，避免同一对象被并发读写）
 	go app.worker(ctx)
@@ -250,19 +252,12 @@ func main() {
 
 	// 6) 归档保留：按 retain_days 设置周期清理过期记录（设置里改为 0 即关闭）
 	go app.retentionLoop(ctx, 6*time.Hour)
+	go app.sendLoop(ctx)
 
-	// 5) HTTP
-	srv := &http.Server{
-		Addr:              fmt.Sprintf("%s:%d", cfg.ListenHost, cfg.ListenPort),
-		Handler:           api.New(app, bus, cfg.WebDir).Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      120 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
 	go func() {
-		log.Printf("HTTP 监听 %s:%d", cfg.ListenHost, cfg.ListenPort)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("HTTP 服务异常退出: %v", err)
+		log.Printf("本地 RPC 已就绪，不监听 TCP 端口")
+		if err := localrpc.Serve(ctx, listener, app.dispatch); err != nil {
+			log.Printf("ERROR RPC 服务异常退出: %v", err)
 			cancel()
 		}
 	}()
@@ -296,10 +291,6 @@ func main() {
 	case <-ctx.Done():
 	}
 	cancel()
-
-	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer shutCancel()
-	_ = srv.Shutdown(shutCtx)
 
 	log.Printf("已退出")
 }
@@ -440,36 +431,18 @@ func (a *App) guardLoop(ctx context.Context) {
 	}
 }
 
-// modemWatch 周期性检查 modem 关键状态，只在真正变化时推送。
-//
-// 60 秒一次而不是更频繁：每次检查要 spawn 两个 mmcli（约 110ms），
-// 而信号强度这类数值本来就不需要秒级刷新。
-func (a *App) modemWatch(ctx context.Context, iv time.Duration) {
-	t := time.NewTicker(iv)
-	defer t.Stop()
-
-	last := ""
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			st := a.modem.Status()
-			sig := st.State + "|" + st.Registration + "|" + st.AccessTech + "|" + st.PSState
-			if sig == last {
-				continue
-			}
-			last = sig
-			a.bus.Publish("modem", st)
-		}
-	}
-}
-
 // ---------------------------------------------------------------------------
 // 单条短信处理（核心状态机）
 // ---------------------------------------------------------------------------
 
 func (a *App) process(path string) {
+	a.activeMu.Lock()
+	active := a.activePaths[path]
+	a.activeMu.Unlock()
+	if active {
+		a.requeue(path, requeueDelay)
+		return
+	}
 	sms, err := a.modem.Fetch(path)
 	if err != nil {
 		a.handleFetchError(path, err)
@@ -512,7 +485,14 @@ func (a *App) process(path string) {
 	a.mu.Unlock()
 
 	state := sms.State
+	if sms.PDUType == "submit" && state != "sent" && state != "delivered" && state != "failed" {
+		return
+	}
 	if pendingStates[state] {
+		// 出站中间态不能靠超时猜成 sent，尤其是重启后待确认的发送任务。
+		if sms.PDUType == "submit" {
+			return
+		}
 		if now.Sub(firstSeen) < pendingMax {
 			// 还没稳定，稍后再看
 			a.requeue(path, requeueDelay)
@@ -569,20 +549,19 @@ func (a *App) process(path string) {
 	}
 	if direction == "in" {
 		msg.DelayS = store.DeliveryDelay(ts)
-		// 提前算好验证码：Archive 里 Code 为空时也会算一次（幂等），
-		// 这里先填是为了下面的 SSE 事件能直接带上，不用重复提取
+		// 验证码是正文的派生数据，归档入口也会做幂等兜底。
 		msg.Code = otp.Extract(body)
 	}
 
 	archived, err := a.store.Archive(msg)
 	if err != nil {
 		// 入库失败绝不删除，宁可让它留在 modem 里下一轮再试
-		log.Printf("WARN 归档失败，保留在原处 %s (%s %s): %v", path, sms.Number, ts, err)
+		log.Printf("WARN 归档失败，保留在原处 %s: %v", path, err)
 		a.requeue(path, 5*time.Second)
 		return
 	}
 	if !archived {
-		log.Printf("WARN 未确认归档，保留在原处 %s (%s %s)", path, sms.Number, ts)
+		log.Printf("WARN 未确认归档，保留在原处 %s", path)
 		a.requeue(path, 5*time.Second)
 		return
 	}
@@ -597,134 +576,14 @@ func (a *App) process(path string) {
 	delete(a.states, path)
 	a.mu.Unlock()
 
-	// 推送给前端。只带轻量字段即可 —— 页面收到后会重新拉一次列表拿完整记录，
-	// 这样不用在这里重复构造 Message（也就不会和数据库里的 id 对不上）。
-	//
-	// 只有入站在这里推：出站由 sendOne 在拿到最终状态后推。
-	// 两边都推会让同一条短信产生两次事件（页面闪两下），而且出站的状态
-	// 只有 sendOne 知道，这里拿到的是中间态。
 	if direction == "in" {
-		a.bus.Publish("sms", map[string]interface{}{
-			"dir":   direction,
-			"peer":  sms.Number,
-			"body":  body,
-			"code":  msg.Code,
-			"ts":    ts,
-			"state": state,
-		})
-	}
-
-	if direction == "in" {
-		preview := strings.ReplaceAll(body, "\n", " ")
-		r := []rune(preview)
-		if len(r) > 40 {
-			preview = string(r[:40])
-		}
-		log.Printf("in  %s %s: %s", sms.Number, ts, preview)
+		log.Printf("in 短信已归档 (%s)", ts)
 	}
 }
 
 // ---------------------------------------------------------------------------
 // 发送
 // ---------------------------------------------------------------------------
-
-// SendSMS 拆分并逐条发送。
-func (a *App) SendSMS(number, text string) api.SendOutcome {
-	a.sendMu.Lock()
-	defer a.sendMu.Unlock()
-
-	parts := splitBody(text)
-	out := api.SendOutcome{Parts: len(parts), Results: make([]api.SendPart, 0, len(parts))}
-	allOK := true
-	for i, chunk := range parts {
-		part := a.sendOne(number, chunk)
-		if !part.OK {
-			allOK = false
-		}
-		out.Results = append(out.Results, part)
-		if i < len(parts)-1 {
-			time.Sleep(time.Second) // 多段之间稍作间隔，避免 modem 忙不过来
-		}
-	}
-	out.OK = allOK
-	return out
-}
-
-func (a *App) sendOne(number, body string) api.SendPart {
-	path, err := a.modem.Create(number, body)
-	if err != nil {
-		return api.SendPart{OK: false, Error: err.Error()}
-	}
-
-	// 先落库占位：这样事件线程看到同一个对象时只会补状态，不会重复入库
-	ts := time.Now().Format("2006-01-02T15:04:05-0700")
-	if _, err := a.store.Archive(store.Message{
-		Dir: "out", Peer: number, Body: body, TS: ts,
-		State: "queued", PDUType: "submit", MMPath: path,
-	}); err != nil {
-		log.Printf("WARN 发送前落库失败: %v", err)
-	}
-
-	if err := a.modem.Send(path); err != nil {
-		_ = a.store.FailByPath(path, err.Error())
-		_ = a.modem.Delete(path)
-		return api.SendPart{OK: false, Error: err.Error(), Path: path}
-	}
-
-	finalState := map[string]bool{
-		"sent": true, "failed": true, "delivered": true, "stored": true,
-	}
-	state, ref, last := "queued", "", ""
-	deadline := time.Now().Add(45 * time.Second)
-	for time.Now().Before(deadline) {
-		sms, err := a.modem.Fetch(path)
-		if err != nil || sms == nil {
-			break // 对象已被事件线程收走
-		}
-		if sms.Reference != "" {
-			ref = sms.Reference
-		}
-		last = sms.State
-		if finalState[sms.State] {
-			state = sms.State
-			break
-		}
-		time.Sleep(1500 * time.Millisecond)
-	}
-
-	if state == "queued" {
-		// --send 已返回成功、对象也被消费了：按已发送处理
-		// （真正的失败 modem 通常会明确给出 failed）
-		if last == "failed" {
-			state = "failed"
-		} else {
-			state = "sent"
-		}
-	}
-
-	_ = a.store.UpdateStateByPath(path, state)
-	if st, err := a.store.StateByPath(path); err == nil && st == "failed" {
-		state = "failed"
-	}
-	_ = a.modem.Delete(path)
-
-	// 出站消息在这里推事件：多端同时开着页面时，A 端发出的短信
-	// B 端也能立刻看到（SSE 已经取代轮询，不推就只能等兜底刷新）。
-	a.bus.Publish("sms", map[string]interface{}{
-		"dir":   "out",
-		"peer":  number,
-		"body":  body,
-		"ts":    ts,
-		"state": state,
-	})
-
-	return api.SendPart{
-		OK:        state == "sent",
-		State:     state,
-		Reference: ref,
-		Path:      path,
-	}
-}
 
 // GSM-7 基本字符集。全部命中时单条 160 字，否则按 UCS2 单条 70 字。
 const gsm7Chars = "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?" +
@@ -742,32 +601,42 @@ func isGSM7(s string) bool {
 // splitBody 把超长正文切成多条，每段尾部加 (i/n) 标记。
 func splitBody(body string) []string {
 	limit := 160
-	if !isGSM7(body) {
+	gsm := isGSM7(body)
+	if !gsm {
 		limit = 70
 	}
 	runes := []rune(body)
-	if len(runes) <= limit {
+	units := func(r rune) int {
+		if !gsm && utf16.RuneLen(r) == 2 {
+			return 2
+		}
+		return 1
+	}
+	size := 0
+	for _, r := range runes {
+		size += units(r)
+	}
+	if size <= limit {
 		return []string{body}
 	}
-
-	total := (len(runes) + limit - 1) / limit
-	out := make([]string, 0, total)
-	idx := 0
-	for idx < len(runes) {
-		marker := fmt.Sprintf("(%d/%d)", len(out)+1, total)
-		// 留出标记和它的分隔空格
-		take := limit - len([]rune(marker)) - 1
-		if take < 1 {
-			take = 1
+	total := 2
+	for {
+		out := []string{}
+		for idx := 0; idx < len(runes); {
+			marker := fmt.Sprintf(" (%d/%d)", len(out)+1, total)
+			end, used := idx, len(marker)
+			for end < len(runes) && used+units(runes[end]) <= limit {
+				used += units(runes[end])
+				end++
+			}
+			out = append(out, string(runes[idx:end])+marker)
+			idx = end
 		}
-		end := idx + take
-		if end > len(runes) {
-			end = len(runes)
+		if len(out) == total {
+			return out
 		}
-		out = append(out, string(runes[idx:end])+marker)
-		idx = end
+		total = len(out)
 	}
-	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -828,7 +697,7 @@ func (a *App) forwardBatch(ctx context.Context) {
 			}
 			if err := a.sender.Send(ch, v); err != nil {
 				_ = a.store.MarkDelivery(m.ID, ch.ID, "failed", err.Error())
-				log.Printf("forward #%d -> %s 失败: %v", m.ID, ch.Name, err)
+				log.Printf("WARN forward #%d -> %s 失败: %v", m.ID, ch.Name, err)
 				allOK = false
 				continue
 			}
@@ -855,12 +724,12 @@ func fmtForwardTime(ts string) string {
 }
 
 // ---------------------------------------------------------------------------
-// api.Backend 实现
+// LuCI 数据与维护操作
 // ---------------------------------------------------------------------------
 
 // Status 汇总 modem、归档库与网关自身状态。
 func (a *App) Status() api.StatusPayload {
-	st := a.modem.Status()
+	st := a.cachedModemStatus()
 	counts, _ := a.store.Counts()
 	today, _ := a.store.Today()
 	pg, _ := a.store.Paging24h()
@@ -899,26 +768,6 @@ func (a *App) resolveOwnNumber(st *modem.Status) (string, string) {
 		}
 	}
 	return "", "none"
-}
-
-// System 返回最近一次系统指标采样（由后台 goroutine 每 5 秒刷新）。
-func (a *App) System() interface{} {
-	return a.sys.Last()
-}
-
-// Settings 返回当前生效的设置项（只读，改配置请走 LuCI）。
-func (a *App) Settings() interface{} {
-	own, src := a.resolveOwnNumber(a.modem.Status())
-	return api.SettingsPayload{
-		OwnNumber:       own,
-		OwnNumberSource: src,
-		Values: map[string]string{
-			"own_number":  a.cfg.OwnNumber,
-			"retain_days": strconv.Itoa(a.cfg.RetainDays),
-		},
-		APITokenSet: a.cfg.APIToken != "",
-		ReadOnly:    true,
-	}
 }
 
 // ListMessages 分页查询归档。
@@ -1021,14 +870,8 @@ func (a *App) retentionLoop(ctx context.Context, iv time.Duration) {
 	}
 }
 
-// Token 返回 API 访问口令，空表示不鉴权。
-// 口令来自 UCI api_token，进程内只读，不需要加锁。
-func (a *App) Token() string {
-	return a.cfg.APIToken
-}
-
 // ---------------------------------------------------------------------------
-// 转发通道管理（api.Backend）
+// 转发通道管理
 // ---------------------------------------------------------------------------
 
 // ListChannels 返回所有通道，敏感字段已脱敏。
@@ -1103,8 +946,8 @@ func (a *App) syncDDNSRecord(r *ddns.Record) {
 	}
 	changed, ip, err := a.cf.Sync(r, "")
 	if err != nil {
-		_ = a.store.SetDDNSState(r.ID, "", err.Error())
-		log.Printf("ddns %s (%s) 失败: %v", r.Name, r.Type, err)
+		_ = a.store.SetDDNSState(r.ID, "", "同步失败，详见运行日志")
+		log.Printf("WARN ddns %s (%s) 失败: %v", r.Name, r.Type, err)
 		return
 	}
 	_ = a.store.SetDDNSState(r.ID, ip, "")
@@ -1178,21 +1021,6 @@ func (a *App) SyncDDNSNow(id int64) (string, error) {
 		return fmt.Sprintf("已更新为 %s", ip), nil
 	}
 	return fmt.Sprintf("无需更新（%s）", ip), nil
-}
-
-// setAsideBrokenDB 把打不开的库连同 -wal/-shm 改名挪走，让上层重建空库。
-// 只改名不删除：坏库是唯一还能捞数据的现场。
-func setAsideBrokenDB(path string) error {
-	suffix := ".bad-" + time.Now().Format("20060102-150405")
-	for _, p := range []string{path, path + "-wal", path + "-shm"} {
-		if _, err := os.Stat(p); err != nil {
-			continue // 不存在是正常的（例如 WAL 已清空）
-		}
-		if err := os.Rename(p, p+suffix); err != nil {
-			return fmt.Errorf("挪走 %s 失败: %w", p, err)
-		}
-	}
-	return nil
 }
 
 // channelIDs 取出全部通道主键，供清理孤儿投递记录用。

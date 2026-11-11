@@ -1,10 +1,9 @@
 // Package store 负责短信归档库（SQLite）。
 //
-// 这里只存"可丢数据"：短信、每个通道的投递结果、DDNS 的运行态。
+// 这里持久保存短信、发送队列、通道投递结果和 DDNS 运行态。
 // 配置（通道、DDNS、启动参数）不在这里 —— 唯一来源是 UCI /etc/config/smsrelay。
 //
-// 因此库是可以随时重建的：打不开就改名留证后重建，配置不受影响。
-// 升级逻辑只给老库补列（delay_s、code）。
+// 旧库增量迁移；打不开时保留现场，不自动重建空库。
 package store
 
 import (
@@ -12,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,21 +101,37 @@ type Store struct {
 
 // Open 打开（或创建）归档库，并完成必要的 pragma 与列升级。
 func Open(path string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("创建数据目录失败: %w", err)
 	}
-	db, err := sql.Open("sqlite3", path)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(0600); err != nil {
+		f.Close()
+		return nil, err
+	}
+	f.Close()
+	// 参数放在 DSN 中，保证连接池里的每条连接都有相同的同步和等待策略。
+	u := url.URL{Scheme: "file", Path: path}
+	q := u.Query()
+	q.Set("_journal_mode", "WAL")
+	q.Set("_synchronous", "FULL")
+	q.Set("_busy_timeout", "15000")
+	u.RawQuery = q.Encode()
+	db, err := sql.Open("sqlite3", u.String())
 	if err != nil {
 		return nil, fmt.Errorf("打开数据库失败: %w", err)
 	}
-	// WAL 下读不阻塞写；连接数不需要很多，但要允许 HTTP 查询并发。
+	// WAL 下读不阻塞写；连接数有界，允许本地 RPC 分页查询并发。
 	db.SetMaxOpenConns(8)
 	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(time.Hour)
 
 	for _, p := range []string{
 		"PRAGMA journal_mode=WAL",
-		"PRAGMA synchronous=NORMAL",
+		"PRAGMA synchronous=FULL",
 		"PRAGMA busy_timeout=15000",
 	} {
 		if _, err := db.Exec(p); err != nil {
@@ -126,6 +142,14 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("初始化表结构失败: %w", err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(sendSchema); err != nil {
+		db.Close()
+		return nil, err
 	}
 	if err := migrate(db); err != nil {
 		db.Close()
@@ -256,7 +280,7 @@ func DeliveryDelay(ts string) *int {
 //
 // 三种情况：
 //  1. 内容哈希已存在 —— 只补状态，视为已归档
-//  2. 自己发出的短信，5 分钟内同号码同正文 —— 发送接口已写过库，视为已归档
+//  2. 近期发送队列记录的路径、号码、正文同时匹配 —— 只补待确认状态
 //  3. 否则插入新行
 func (s *Store) Archive(m Message) (bool, error) {
 	m.Hash = ContentHash(m.PDUType, m.Peer, m.TS, m.Body)
@@ -283,16 +307,13 @@ func (s *Store) Archive(m Message) (bool, error) {
 	}
 
 	if m.Dir == "out" {
-		var recent int
-		gerr := s.db.QueryRow(
-			"SELECT 1 FROM messages WHERE dir='out' AND peer=? AND body=? "+
-				"AND created_at >= datetime('now','localtime','-5 minutes') LIMIT 1",
-			m.Peer, m.Body).Scan(&recent)
-		if gerr == nil {
-			return true, nil
+		// 发送队列已经持久化的占位记录，只补充同路径、同号码、同正文的状态。
+		res, err := s.db.Exec("UPDATE messages SET state=? WHERE dir='out' AND mm_path=? AND peer=? AND body=? AND state IN ('queued','sending','unknown') AND created_at >= datetime('now','localtime','-5 minutes')", m.State, m.MMPath, m.Peer, m.Body)
+		if err != nil {
+			return false, err
 		}
-		if gerr != sql.ErrNoRows {
-			return false, gerr
+		if n, _ := res.RowsAffected(); n > 0 {
+			return true, s.reconcileSendTasks(m.MMPath)
 		}
 	}
 
@@ -389,7 +410,7 @@ func scanMessage(r rowScanner) (*Message, error) {
 	return &m, nil
 }
 
-// ListQuery 是 /api/messages 的查询条件。
+// ListQuery 是本地 RPC 短信分页查询条件。
 type ListQuery struct {
 	Dir     string
 	Q       string
@@ -471,12 +492,15 @@ func (s *Store) DeleteByIDs(ids []int64) (int64, error) {
 	if _, err := tx.Exec("DELETE FROM channel_deliveries WHERE message_id IN ("+ph+")", args...); err != nil {
 		return 0, err
 	}
-	res, err := tx.Exec("DELETE FROM messages WHERE id IN ("+ph+")", args...)
+	res, err := tx.Exec("DELETE FROM messages WHERE id IN ("+ph+") AND COALESCE(state,'') NOT IN ('queued','sending')", args...)
 	if err != nil {
 		return 0, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
+		return 0, err
+	}
+	if err := pruneSendTasks(tx); err != nil {
 		return 0, err
 	}
 	return n, tx.Commit()
@@ -498,12 +522,15 @@ func (s *Store) DeleteOlderThan(cutoff string) (int64, error) {
 			"(SELECT id FROM messages WHERE substr(ts,1,10) < ?)", cutoff); err != nil {
 		return 0, err
 	}
-	res, err := tx.Exec("DELETE FROM messages WHERE substr(ts,1,10) < ?", cutoff)
+	res, err := tx.Exec("DELETE FROM messages WHERE substr(ts,1,10) < ? AND (dir='in' OR COALESCE(state,'') NOT IN ('queued','sending'))", cutoff)
 	if err != nil {
 		return 0, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
+		return 0, err
+	}
+	if err := pruneSendTasks(tx); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -564,22 +591,24 @@ type Counts struct {
 	Sent    int `json:"sent"`
 	Total   int `json:"total"`
 	Pending int `json:"pending"`
+	Failed  int `json:"failed"`
 }
 
 // Counts 返回累计统计。
 func (s *Store) Counts() (Counts, error) {
 	var c Counts
-	var inbox, sent, pending sql.NullInt64
+	var inbox, sent, pending, failed sql.NullInt64
 	var total int
 	// 空表时 SUM() 返回 NULL，COUNT(*) 返回 0，所以前三个用 NullInt64 接。
 	err := s.db.QueryRow(
-		"SELECT SUM(dir='in'), SUM(dir='out'), COUNT(*), SUM(dir='in' AND forwarded=0) FROM messages").
-		Scan(&inbox, &sent, &total, &pending)
+		"SELECT SUM(dir='in'), SUM(dir='out'), COUNT(*), SUM(dir='in' AND forwarded=0), SUM(dir='in' AND forwarded=2) FROM messages").
+		Scan(&inbox, &sent, &total, &pending, &failed)
 	if err != nil {
 		return c, err
 	}
 	c.Inbox, c.Sent, c.Total = int(inbox.Int64), int(sent.Int64), total
 	c.Pending = int(pending.Int64)
+	c.Failed = int(failed.Int64)
 	return c, nil
 }
 
@@ -703,13 +732,13 @@ func (s *Store) DeliveryStatus(messageID, channelID int64) string {
 func (s *Store) MarkDelivery(messageID, channelID int64, status, errMsg string) error {
 	_, err := s.db.Exec(
 		`INSERT INTO channel_deliveries (message_id, channel_id, status, attempts, last_error, updated_at)
-		 VALUES (?,?,?,1,?,datetime('now','localtime'))
+		 SELECT ?,?,?,1,?,datetime('now','localtime') WHERE EXISTS (SELECT 1 FROM messages WHERE id=?)
 		 ON CONFLICT(message_id, channel_id) DO UPDATE SET
 		   status=excluded.status,
 		   attempts=attempts+1,
 		   last_error=excluded.last_error,
 		   updated_at=excluded.updated_at`,
-		messageID, channelID, status, errMsg)
+		messageID, channelID, status, errMsg, messageID)
 	return err
 }
 

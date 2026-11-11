@@ -6,7 +6,7 @@
 #
 # 做的事：
 #   1. 用 OpenWrt 工具链交叉编译 arm64（CGO + 系统 libsqlite3）
-#   2. scp 二进制 + keepalive + init + UCI + LuCI（菜单/ACL/视图）到设备
+#   2. scp 二进制、服务、RPC、UCI、原生 LuCI 到设备
 #   3. 远端启用并启动服务
 #
 # 注意：
@@ -26,7 +26,7 @@ ROOT=$(cd "$DIR/.." && pwd)
 SSH="sshpass -p $PASS ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 SCP="sshpass -p $PASS scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PreferredAuthentications=password -o PubkeyAuthentication=no"
 
-[ -n "$STAGING_DIR" ] || {
+[ -n "${STAGING_DIR:-}" ] || {
 	echo "!! 未设置 STAGING_DIR"
 	echo "   sqlite 通过 CGO 链接系统 libsqlite3，必须用 OpenWrt 工具链编译。"
 	echo "   在构建树根目录执行： STAGING_DIR=\$PWD/staging_dir ./openwrt/deploy.sh <ip> <pass>"
@@ -59,30 +59,46 @@ $SSH root@$HOST "ls /usr/lib/libsqlite3.so* >/dev/null 2>&1" || {
 	echo "!! 设备上没有 libsqlite3，先装包：apk add libsqlite3（或 opkg install libsqlite3）"
 	exit 1
 }
+$SSH root@$HOST "command -v ubus >/dev/null && test -d /usr/share/rpcd/acl.d && test -f /www/luci-static/resources/view.js" || {
+	echo '!! 设备必须先安装 luci-base、rpcd、rpcd-mod-file'
+	exit 1
+}
 
 echo "== 上传 =="
+$SSH root@$HOST "/etc/init.d/smsrelay stop 2>/dev/null || true"
 $SCP "$DIR/files/usr/bin/smsrelay" root@$HOST:/usr/bin/smsrelay
 $SCP "$DIR/files/usr/bin/smsrelay-keepalive" root@$HOST:/usr/bin/smsrelay-keepalive
+$SCP "$DIR/files/usr/bin/sms" root@$HOST:/usr/bin/sms
 $SCP "$DIR/files/etc/init.d/smsrelay" root@$HOST:/etc/init.d/smsrelay
-# UCI 配置：只在设备上还不存在时推送，避免覆盖已改过的端口/口令/通道
+for service in jz02-power jz02-led; do
+	$SCP "$DIR/files/etc/init.d/$service" root@$HOST:/etc/init.d/
+done
+# UCI 配置：只在设备上还不存在时推送，不覆盖通道与凭据。
 $SSH root@$HOST "[ -f /etc/config/smsrelay ]" || \
 	$SCP "$DIR/files/etc/config/smsrelay" root@$HOST:/etc/config/smsrelay
+$SSH root@$HOST "[ -f /etc/config/jz02 ]" || \
+	$SCP "$DIR/files/etc/config/jz02" root@$HOST:/etc/config/jz02
 $SCP "$DIR/files/usr/share/luci/menu.d/luci-app-smsrelay.json" root@$HOST:/usr/share/luci/menu.d/
 $SCP "$DIR/files/usr/share/rpcd/acl.d/luci-app-smsrelay.json" root@$HOST:/usr/share/rpcd/acl.d/
-$SSH root@$HOST "mkdir -p /www/luci-static/resources/view/smsrelay"
-$SCP "$DIR/files/www/luci-static/resources/view/smsrelay/index.js" root@$HOST:/www/luci-static/resources/view/smsrelay/
-$SCP "$DIR/files/www/luci-static/resources/view/smsrelay/config.js" root@$HOST:/www/luci-static/resources/view/smsrelay/
+$SSH root@$HOST "mkdir -p /www/luci-static/resources/view/smsrelay /usr/libexec/rpcd /lib/upgrade /etc/uci-defaults"
+$SCP "$DIR/files/www/luci-static/resources/view/smsrelay/"*.js root@$HOST:/www/luci-static/resources/view/smsrelay/
+$SCP "$DIR/files/www/luci-static/resources/smsrelay.js" root@$HOST:/www/luci-static/resources/
+$SCP "$DIR/files/usr/libexec/rpcd/smsrelay" root@$HOST:/usr/libexec/rpcd/smsrelay
+$SCP "$DIR/files/lib/upgrade/smsrelay.sh" root@$HOST:/lib/upgrade/
+$SCP "$DIR/files/etc/uci-defaults/90-smsrelay" root@$HOST:/etc/uci-defaults/
 
 echo "== 启用 =="
-$SSH root@$HOST "chmod +x /usr/bin/smsrelay /usr/bin/smsrelay-keepalive /etc/init.d/smsrelay
+$SSH root@$HOST "chmod +x /usr/bin/sms /usr/bin/smsrelay /usr/bin/smsrelay-keepalive /etc/init.d/smsrelay /etc/init.d/jz02-power /etc/init.d/jz02-led /usr/libexec/rpcd/smsrelay
 sh -n /etc/init.d/smsrelay && echo 'init 语法 OK'
-rm -rf /tmp/luci-indexcache /tmp/luci-modulecache 2>/dev/null
+sh /etc/uci-defaults/90-smsrelay && rm -f /etc/uci-defaults/90-smsrelay
 /etc/init.d/smsrelay enable
 /etc/init.d/smsrelay restart
+/etc/init.d/jz02-power restart
+/etc/init.d/jz02-led restart
 /etc/init.d/rpcd restart 2>/dev/null
 sleep 3
 pgrep -f /usr/bin/smsrelay >/dev/null && echo 'smsrelay 运行中' || echo '!! smsrelay 未启动'
 pgrep -f smsrelay-keepalive >/dev/null && echo 'keepalive 运行中' || echo '!! keepalive 未启动'
-curl -s -o /dev/null -w 'web http_code=%{http_code}\n' http://127.0.0.1:8088/ || true"
+ubus call smsrelay status '{}'"
 
 echo "== 完成：LuCI → 服务 → 短信网关 =="

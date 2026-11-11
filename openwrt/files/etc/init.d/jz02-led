@@ -1,0 +1,80 @@
+#!/bin/sh /etc/rc.common
+# jz02v10 LED 控制
+#
+# 目标：只保留 red:power 常亮；green:wlan / blue:wan 默认关闭。
+#
+# 背景（实测）：厂商在 /etc/hotplug.d/iface/99-wifi-led 里做状态指示——
+#   modem ifup  -> blue:wan 亮
+#   lan  ifup   -> green:wlan 设成 phy0rx 触发（WiFi 有流量就闪）
+# 这个 hotplug 已从固件移除，改由本脚本统一接管，避免「谁最后写谁赢」。
+#
+# ⚠️ sim:sel / sim:en / sim:sel2 / sim:en2 表面是 LED，实际是 SIM 卡槽控制线
+#   （DTS: gpios = <&tlmm 1/20/22/23>，gpio_switch 服务就是拿这几个 pin 控卡槽）。
+#   动它们有切槽掉网的风险，本脚本**不碰**。
+#   sp970v11 只有 sim:sel 一根（tlmm 114），由 /etc/init.d/simfix 接管；
+#   该服务按 compatible + 四线拓扑双重门控，在 jz02v10 上直接 return，不会动这里。
+
+START=99
+STOP=10
+USE_PROCD=1
+
+LOG_TAG=jz02-led
+log() { logger -t "$LOG_TAG" "$*"; }
+
+setled() {
+	# $1 = sysfs 名, $2 = 亮度
+	local name="$1" br="$2"
+	[ -e "/sys/class/leds/$name/brightness" ] || return 0
+	echo none > "/sys/class/leds/$name/trigger" 2>/dev/null
+	echo "$br" > "/sys/class/leds/$name/brightness" 2>/dev/null
+}
+
+apply() {
+	local wifi_led="0"
+	[ -r /etc/config/jz02 ] && wifi_led=$(uci -q get jz02.system.led_wifi 2>/dev/null || echo 0)
+
+	setled red:power 1
+	setled blue:wan 0
+
+	if [ "$wifi_led" = "1" ]; then
+		# 可选语义：WiFi 有收发时闪绿灯（默认关闭）
+		[ -e /sys/class/leds/green:wlan/trigger ] && echo phy0rx > /sys/class/leds/green:wlan/trigger 2>/dev/null
+	else
+		setled green:wlan 0
+	fi
+}
+
+start_service() {
+	apply
+	# vendor 侧（hotplug / qmi / gc）可能在 network 起来之后再写 LED，
+	# 这里在 5s / 30s 各压一次，确保最终态稳定。
+	( sleep 5; apply; sleep 25; apply ) >/dev/null 2>&1 &
+}
+
+stop_service() {
+	:
+}
+
+reload_service() {
+	apply
+}
+
+service_triggers() {
+	procd_add_reload_trigger jz02
+}
+
+blink() {
+	# 用法: jz02-led blink [led] [次数]   默认 blue:wan x3
+	local name="${1:-blue:wan}" n="${2:-3}" i=0
+	while [ "$i" -lt "$n" ]; do
+		setled "$name" 1
+		sleep 1
+		setled "$name" 0
+		sleep 1
+		i=$((i + 1))
+	done
+	apply
+}
+
+EXTRA_COMMANDS="blink"
+EXTRA_HELP="	blink [led] [times]	闪几下（默认 blue:wan 3 次）"

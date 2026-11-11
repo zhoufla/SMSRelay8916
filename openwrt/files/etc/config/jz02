@@ -1,0 +1,6 @@
+config jz02 'system'
+	option cpu_governor 'schedutil'
+	option cpu_max_freq '800000'
+	option cpu_min_freq '200000'
+	# 1 = 用绿灯表示 WiFi 有收发（默认 0，只留电源灯）
+	option led_wifi '0'

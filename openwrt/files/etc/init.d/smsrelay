@@ -6,7 +6,7 @@
 # uci commit 后由下面的 reload trigger 重启服务。
 #
 # 二进制: /usr/bin/smsrelay
-# 数据:   /etc/smsrelay/sms.db（可丢数据；升级时不保留）
+# 数据:   /etc/smsrelay/sms.db（持久记录；升级使用一致性快照）
 # 附带:   LTE 保活实例（防 ECM-IDLE 空闲态收不到寻呼导致短信延迟）
 START=99
 STOP=15
@@ -25,7 +25,8 @@ start_service() {
 
 	# 归档库的父目录必须存在，否则首次启动会因建目录失败而退出
 	config_get db main db_path "/etc/smsrelay/sms.db"
-	mkdir -p "${db%/*}"
+	umask 077
+	mkdir -p "${db%/*}" /var/run/smsrelay
 
 	procd_open_instance gateway
 	procd_set_param command "$PROG" -config "$CFG"

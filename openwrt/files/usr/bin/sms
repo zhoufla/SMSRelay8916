@@ -1,0 +1,34 @@
+#!/bin/sh
+# 本机命令行工具，不依赖 curl/jq，不通过 HTTP。
+# sms status | list [n] | sent [n] | code | logs | send <号码> <正文> | fwd-test <UCI段名>
+. /usr/share/libubox/jshn.sh
+json_init
+method="$1"
+case "$method" in
+	status) ;;
+	list|sent|code)
+		method=messages
+		case "$2" in ''|*[!0-9]*) limit=30 ;; *) limit="$2" ;; esac
+		[ "$limit" -le 100 ] || limit=100
+		[ "$1" = sent ] && dir=out || dir=in
+		json_add_string dir "$dir"
+		json_add_int limit "$limit"
+		json_add_int offset 0
+		[ "$1" = code ] && json_add_boolean has_code 1
+		;;
+	logs) json_add_int limit 100 ;;
+	send)
+		[ -n "$2" ] && [ -n "$3" ] || { echo '用法：sms send <号码> <正文>' >&2; exit 1; }
+		json_add_string request_id "$(tr -d '-' < /proc/sys/kernel/random/uuid)"
+		json_add_string number "$2"
+		shift 2
+		json_add_string text "$*"
+		;;
+	fwd-test)
+		[ -n "$2" ] || { echo '用法：sms fwd-test <已保存的UCI通道段名>' >&2; exit 1; }
+		method=test_channel
+		json_add_string section "$2"
+		;;
+	*) sed -n '2,3p' "$0"; exit 1 ;;
+esac
+exec ubus call smsrelay "$method" "$(json_dump)"

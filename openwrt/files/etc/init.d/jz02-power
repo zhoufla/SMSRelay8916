@@ -1,0 +1,67 @@
+#!/bin/sh /etc/rc.common
+# jz02v10 CPU 频率策略
+#
+# 实测能力（MSM8916 / cpufreq-dt）：
+#   policy0 共享 4 核，档位 200000 400000 800000 998400 1209600 1401600
+#   可用 governor：powersave performance schedutil
+#
+# 这台机器的主业是短信转发，负载是「长时间空闲 + 偶发小突发」：
+#   - 保留 schedutil（空闲时自然落到 200-400MHz，比 ondemand 响应快、比 performance 省）
+#   - 上限压到 800MHz（配置项可改），牺牲峰值换温度
+#   - 不用 powersave：锁 200MHz 会让 LTE 吞吐腰斩
+#
+# 注意：vendor 的 luci-app-cpu-perf 已从固件移除，避免两个服务抢同一组 sysfs。
+
+START=98
+STOP=10
+USE_PROCD=1
+
+. /lib/functions.sh
+
+LOG_TAG=jz02-power
+log() { logger -t "$LOG_TAG" "$*"; }
+
+apply() {
+	local gov maxf minf p
+	config_load jz02
+	config_get gov  system cpu_governor schedutil
+	config_get maxf system cpu_max_freq 800000
+	config_get minf system cpu_min_freq 200000
+
+	for p in /sys/devices/system/cpu/cpufreq/policy*; do
+		[ -w "$p/scaling_max_freq" ] || continue
+		# 顺序很重要：先抬/降 max 再设 min，否则 min > 新 max 会被内核拒绝
+		echo "$maxf" > "$p/scaling_max_freq" 2>/dev/null || log "set max=$maxf failed on $p"
+		echo "$minf" > "$p/scaling_min_freq" 2>/dev/null
+		echo "$gov"  > "$p/scaling_governor" 2>/dev/null
+		log "$(basename "$p"): governor=$gov max=$(cat "$p/scaling_max_freq" 2>/dev/null) min=$(cat "$p/scaling_min_freq" 2>/dev/null)"
+	done
+}
+
+start_service() {
+	apply
+	# 有些 vendor 脚本会在 network 起来后重设 governor，这里补一次
+	( sleep 20; apply ) >/dev/null 2>&1 &
+}
+
+reload_service() {
+	apply
+}
+
+service_triggers() {
+	procd_add_reload_trigger jz02
+}
+
+setmax() {
+	local f="${1:?usage: jz02-power setmax <hz>   例: jz02-power setmax 998400}"
+	case "$f" in
+		*[!0-9]*) echo "FATAL: 频率必须是纯数字（Hz），例 998400"; exit 1 ;;
+	esac
+	uci set jz02.system.cpu_max_freq="$f"
+	uci commit jz02
+	apply
+	echo "cpu_max_freq=$f applied"
+}
+
+EXTRA_COMMANDS="setmax"
+EXTRA_HELP="    setmax <hz>    手动设置最高频率（例: jz02-power setmax 998400）"

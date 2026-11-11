@@ -1,19 +1,33 @@
 {
   "luci-app-smsrelay": {
-    "description": "访问短信网关的设置页与短信记录页",
+    "description": "SMSRelay native LuCI interface",
     "read": {
+      "uci": [ "smsrelay", "jz02" ],
       "ubus": {
-        "service": [ "list" ],
-        "uci": [ "get", "state" ]
+        "smsrelay": [ "status", "messages", "message", "send_task", "logs", "channels", "ddns", "operation" ],
+        "file": [ "read", "list" ],
+        "network.interface": [ "dump" ],
+        "network.device": [ "status" ]
       },
-      "uci": [ "smsrelay" ]
+      "file": {
+        "/sys/devices/system/cpu": [ "list" ],
+        "/sys/devices/system/cpu/cpu*/online": [ "read" ],
+        "/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq": [ "read" ],
+        "/sys/devices/system/cpu/cpufreq/policy*/*": [ "read" ],
+        "/sys/class/thermal": [ "list" ],
+        "/sys/class/thermal/thermal_zone*/type": [ "read" ],
+        "/sys/class/thermal/thermal_zone*/temp": [ "read" ],
+        "/sys/devices/virtual/thermal/thermal_zone*/type": [ "read" ],
+        "/sys/devices/virtual/thermal/thermal_zone*/temp": [ "read" ],
+        "/sys/class/leds/green:wlan/brightness": [ "read" ],
+        "/sys/devices/platform/leds/leds/green:wlan/brightness": [ "read" ]
+      }
     },
     "write": {
+      "uci": [ "smsrelay", "jz02" ],
       "ubus": {
-        "rc": [ "init" ],
-        "uci": [ "set", "add", "delete", "commit", "apply", "changes", "order", "rename" ]
-      },
-      "uci": [ "smsrelay" ]
+        "smsrelay": [ "send", "delete", "forward", "cleanup", "test_channel", "sync_ddns" ]
+      }
     }
   }
 }

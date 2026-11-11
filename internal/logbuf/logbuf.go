@@ -1,11 +1,13 @@
 // Package logbuf 维护一个有界的内存日志环形缓冲。
 //
-// 接在标准库 log 的输出后面（io.MultiWriter），stderr 照常进 journald，
-// 缓冲里的副本供 Web 界面查看。容量固定、写满自动淘汰最旧的 ——
-// 所以这个功能不需要额外的清理任务；跨重启的持久化仍由 journald 负责。
+// 接在标准库 log 输出后面，stderr 照常进入 OpenWrt logd，
+// 缓冲里的副本供原生 LuCI 查看，容量固定、写满自动淘汰最旧的。
+// 是否跨重启保存系统日志由 logd 配置决定。
 package logbuf
 
 import (
+	"io"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -54,7 +56,9 @@ func (b *Buffer) Write(p []byte) (int, error) {
 			e.Msg = line[stdPrefixLen:]
 		}
 	}
-	if strings.Contains(e.Msg, "WARN") {
+	if strings.Contains(e.Msg, "ERROR") {
+		e.Level = "error"
+	} else if strings.Contains(e.Msg, "WARN") {
 		e.Level = "warn"
 	}
 
@@ -74,10 +78,10 @@ func (b *Buffer) Snapshot(limit int, level string) []Entry {
 	defer b.mu.Unlock()
 
 	src := b.entries
-	if level == "warn" {
+	if level != "" {
 		filtered := make([]Entry, 0, len(src))
 		for _, e := range src {
-			if e.Level == "warn" {
+			if e.Level == level {
 				filtered = append(filtered, e)
 			}
 		}
@@ -89,4 +93,32 @@ func (b *Buffer) Snapshot(limit int, level string) []Entry {
 	out := make([]Entry, limit)
 	copy(out, src[len(src)-limit:])
 	return out
+}
+
+type redactingWriter struct {
+	out     io.Writer
+	secrets []string
+}
+
+var logURL = regexp.MustCompile(`https?://[^\s"<>]+`)
+var logNumber = regexp.MustCompile(`[0-9]{11,20}`)
+
+func RedactingWriter(out io.Writer, secrets []string) io.Writer {
+	return &redactingWriter{out: out, secrets: append([]string(nil), secrets...)}
+}
+
+func (w *redactingWriter) Write(p []byte) (int, error) {
+	s := string(p)
+	for _, secret := range w.secrets {
+		if secret != "" {
+			s = strings.ReplaceAll(s, secret, "[redacted]")
+		}
+	}
+	s = logURL.ReplaceAllString(s, "[URL]")
+	s = logNumber.ReplaceAllString(s, "[number]")
+	_, err := io.WriteString(w.out, s)
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
