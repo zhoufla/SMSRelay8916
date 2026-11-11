@@ -39,8 +39,9 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
 .tabs{display:flex;gap:4px;background:var(--bg2);border:1px solid var(--line);border-radius:12px;
   padding:3px;margin-bottom:14px;overflow-x:auto;scrollbar-width:none}
 .tabs::-webkit-scrollbar{display:none}
-.tabs button{flex:1 0 auto;background:none;border:0;color:var(--fg2);font:inherit;font-size:12.5px;
-  padding:8px 12px;border-radius:9px;cursor:pointer;white-space:nowrap}
+.tabs button,.tabs a{flex:1 0 auto;background:none;border:0;color:var(--fg2);font:inherit;font-size:12.5px;
+  padding:8px 12px;border-radius:9px;cursor:pointer;white-space:nowrap;text-decoration:none;
+  display:inline-flex;align-items:center;justify-content:center}
 .tabs button.act{background:var(--bg3);color:var(--fg);font-weight:600}
 .panel{display:none}
 .panel.act{display:block}
@@ -175,8 +176,10 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
   <div class="tabs" id="tabs">
     <button data-tab="sms" class="act">短信</button>
     <button data-tab="sys">系统</button>
-    <!-- 配置已迁到 LuCI：服务只读加载 /etc/config/smsrelay，本页不提供编辑，
-         也不做跳转——LuCI 在 uhttpd 的 80，本页在 :8088，从外部无法可靠拼出地址 -->
+    <!-- 配置已迁到 LuCI：服务只读加载 /etc/config/smsrelay，本页不提供编辑。
+         LuCI 在 uhttpd 的 80，本页在 :8088，相对路径会落到本服务上返回 not found，
+         所以 href 由脚本显式拼成「主机名 + 默认端口」。 -->
+    <a id="luci-link" href="/cgi-bin/luci/admin/services/smsrelay/config">设置 (LuCI) ↗</a>
     <button data-tab="log">日志</button>
   </div>
 
@@ -299,6 +302,15 @@ let logLv = "";                      // 日志级别过滤
 let curTab = 'sms', es = null, esOK = false;
 const TOKEN = localStorage.getItem('smsgw_token') || '';
 const H = TOKEN ? {'X-Token': TOKEN} : {};
+
+/* LuCI 在 uhttpd 的 80，本页在 :8088。相对路径会被本服务接住返回 not found，
+   这里显式换成主机名 + 默认端口；IPv6 字面量要保留方括号。 */
+(function(){
+  const host = location.hostname.replace(/^\[|\]$/g, '');
+  $('#luci-link').href = location.protocol + '//' +
+    (host.includes(':') ? '[' + host + ']' : host) +
+    '/cgi-bin/luci/admin/services/smsrelay/config';
+})();
 
 function toast(msg, ms = 2600){
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
