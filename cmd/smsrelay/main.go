@@ -53,6 +53,10 @@ const (
 	// 随后短信中心复用相同分片序号时就会撞车
 	// （MM 日志：A part with index 1 was already taken），整条短信永久丢失。
 	holdSeconds = 6 * time.Second
+	// receivedHold：MM 已回报终态（received/sent/delivered/failed）时正文必然收齐，
+	// 只留 1 秒防抖即归档；保守 holdSeconds 只用于中间态兜底。
+	// 这是收信延时的主要开关：单条短信从 D-Bus 推送到归档可压进 2~3 秒。
+	receivedHold = 1 * time.Second
 	// requeueDelay：条件未满足时多久后重新检查同一个对象。
 	requeueDelay = 2 * time.Second
 	// maxFetchFailures：同一个对象读取失败的上限。
@@ -485,6 +489,9 @@ func (a *App) process(path string) {
 	a.mu.Unlock()
 
 	state := sms.State
+	origState := state
+	// pendingMax 超时后的兜底状态：已经等了 30 秒，归档不再追加保守 hold。
+	forcedState := false
 	if sms.PDUType == "submit" && state != "sent" && state != "delivered" && state != "failed" {
 		return
 	}
@@ -504,6 +511,7 @@ func (a *App) process(path string) {
 		} else {
 			state = "sent"
 		}
+		forcedState = true
 	}
 
 	body := sms.RawText
@@ -526,7 +534,17 @@ func (a *App) process(path string) {
 		a.requeue(path, requeueDelay)
 		return
 	}
-	if now.Sub(lastChange) < holdSeconds {
+	// 自适应稳定期：MM 报终态（或 pendingMax 兜底）时正文已收齐，走短防抖；
+	// 其余（分片重组中、状态未知）维持保守 holdSeconds 防长短信分片撞车。
+	hold := holdSeconds
+	switch origState {
+	case "received", "sent", "delivered", "failed":
+		hold = receivedHold
+	}
+	if forcedState {
+		hold = receivedHold
+	}
+	if now.Sub(lastChange) < hold {
 		a.requeue(path, requeueDelay)
 		return
 	}
