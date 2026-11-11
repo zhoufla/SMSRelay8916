@@ -17,7 +17,7 @@ KEEPALIVE=/usr/bin/smsrelay-keepalive
 CFG=/etc/config/smsrelay
 
 start_service() {
-	local enabled keepalive db
+	local enabled keepalive db tz
 
 	config_load smsrelay
 	config_get_bool enabled main enabled 1
@@ -29,6 +29,11 @@ start_service() {
 
 	procd_open_instance gateway
 	procd_set_param command "$PROG" -config "$CFG"
+	# OpenWrt 将时区写在 /etc/TZ；Go 不读取该文件，需传给进程，
+	# 否则设备没有 zoneinfo 时 Go 会退回 UTC，导致发送短信时间差 8 小时。
+	tz="$(cat /etc/TZ 2>/dev/null)"
+	[ -n "$tz" ] || tz="UTC"
+	procd_set_param env "TZ=$tz"
 	# 挂了自动拉起：3600s 窗口内无限次重试，间隔 5s
 	procd_set_param respawn 3600 5 0
 	procd_set_param stdout 1
