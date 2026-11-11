@@ -117,21 +117,27 @@ func TestDefaultWebhookTemplateParses(t *testing.T) {
 	}
 }
 
-// 带验证码时空模板选带码默认版，验证码独立成行、在最前。
+// 带验证码时空模板选带码默认版：首行「【验证码】发件人」，正文，末行手机号。
 func TestRenderDefaultWithCode(t *testing.T) {
 	v := baseVars()
 	v.Code = "483921"
 	out := Render("", v)
-	if !strings.HasPrefix(out, "收到短信\n验证码：483921\n") {
-		t.Fatalf("带码默认模板首行应是验证码: %q", out)
+	want := "【483921】10086\n" + v.Body + "\n手机号：13800000000"
+	if out != want {
+		t.Fatalf("带码默认模板不对:\n got %q\nwant %q", out, want)
 	}
 }
 
-// 不带验证码时绝不能出现空的「验证码：」行。
+// 不带验证码时三行：发件人、正文、手机号，且不出现验证码字样。
 func TestRenderDefaultWithoutCode(t *testing.T) {
-	out := Render("", baseVars())
-	if strings.Contains(out, "验证码") {
-		t.Fatalf("无码消息不应出现验证码行: %q", out)
+	v := baseVars()
+	out := Render("", v)
+	want := "10086\n" + v.Body + "\n手机号：13800000000"
+	if out != want {
+		t.Fatalf("默认模板不对:\n got %q\nwant %q", out, want)
+	}
+	if strings.Contains(out, "验证码") || strings.Contains(out, "收到短信") {
+		t.Fatalf("无码消息不应出现验证码/收到短信行: %q", out)
 	}
 }
 

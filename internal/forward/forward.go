@@ -129,12 +129,13 @@ type Vars struct {
 	Prefix    string // 通道配置的前缀，由 Send 填入，不用于其它场景
 }
 
-// 默认模板：带本机号码。这正是「转发内容里要有收信号码」的落地方式。
-const defaultTemplate = "{{prefix}}收到短信\n收信号码：{{own_number}}\n发送号码：{{number}}\n内容：{{body}}\n时间：{{ts}}"
+// 默认模板只保留三行：发件人、正文、本机号码。
+// 通知栏/钉钉里不用展开就能看到「谁发的、说了什么、发到了哪张卡」。
+const defaultTemplate = "{{number}}\n{{body}}\n手机号：{{own_number}}"
 
-// 带验证码的默认模板：验证码单独一行放在最前，钉钉上一眼可见，不用翻正文。
-// 仅在正文提取到验证码时使用（见 Render）。
-const defaultTemplateWithCode = "{{prefix}}收到短信\n验证码：{{code}}\n收信号码：{{own_number}}\n发送号码：{{number}}\n内容：{{body}}\n时间：{{ts}}"
+// 带验证码的默认模板：验证码用【】提到最前，后面紧跟发件人，
+// 例：【499805】10086910。仅在正文提取到验证码时使用（见 Render）。
+const defaultTemplateWithCode = "【{{code}}】{{number}}\n{{body}}\n手机号：{{own_number}}"
 
 // DefaultWebhookTemplate 是 webhook 通道没填正文模板时的兜底。
 //
@@ -153,7 +154,7 @@ var placeholderRe = regexp.MustCompile(`\{\{(\w+)\}\}`)
 // 阶段一次性替换，替换进去的内容不会被再次当成占位符解析 ——
 // 这样短信正文里出现 "{{number}}" 也不会被二次替换。
 //
-// tmpl 为空时选默认模板：正文带验证码用带码版（钉钉首行直接显示验证码），
+// tmpl 为空时选默认模板：正文带验证码用带码版（首行是「【验证码】发件人」），
 // 否则用普通版。注意模板是静态的、没有条件语法，所以带不带码要在选模板这一步分流。
 func Render(tmpl string, v Vars) string {
 	if tmpl == "" {
