@@ -259,13 +259,33 @@ func ContentHash(pduType, peer, ts, body string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// DeliveryDelay 返回 PDU 时间戳与本机时间的差（秒）。
+// DeliveryDelay 返回短信时间戳与本机时间的差（秒）。
 // 大于 60 通常说明短信在短信中心排过队，即设备当时处于空闲态、寻呼没打到。
+//
+// MM 给的时间戳可能带时区偏移（入站常见 "+08"，出站 "+0000"）也可能不带；
+// 带偏移时按偏移解析绝对时间，否则才退回进程本地时区。
+// 注意 Go 不认 POSIX 形式的 TZ="CST-8"（会静默退回 UTC），
+// 所以带偏移的时间戳绝不能按 time.Local 硬解析，否则差值为负被钳成 0。
 func DeliveryDelay(ts string) *int {
 	if len(ts) < 19 {
 		return nil
 	}
-	t, err := time.ParseInLocation("2006-01-02T15:04:05", ts[:19], time.Local)
+	var t time.Time
+	var err error
+	rest := ts[19:]
+	switch {
+	case rest[0] == '+' || rest[0] == '-':
+		switch {
+		case len(rest) >= 6 && rest[3] == ':':
+			t, err = time.Parse("2006-01-02T15:04:05-07:00", ts[:19]+rest[:6])
+		case len(rest) >= 5 && isDigit(rest[1]):
+			t, err = time.Parse("2006-01-02T15:04:05-0700", ts[:19]+rest[:5])
+		default:
+			t, err = time.Parse("2006-01-02T15:04:05-07", ts[:19]+rest[:3])
+		}
+	default:
+		t, err = time.ParseInLocation("2006-01-02T15:04:05", ts[:19], time.Local)
+	}
 	if err != nil {
 		return nil
 	}
@@ -275,6 +295,8 @@ func DeliveryDelay(ts string) *int {
 	}
 	return &d
 }
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
 // Archive 把一条短信写入归档库，返回是否已确认归档（true 才允许删除 modem 内的副本）。
 //
