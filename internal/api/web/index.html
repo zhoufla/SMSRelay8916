@@ -231,10 +231,22 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
         <div class="bar"><i id="m-mem-bar"></i></div>
       </div>
       <div class="metric">
-        <div class="k">温度</div>
-        <div class="v"><span id="m-temp">--</span><small>°C</small></div>
-        <div class="sub" id="m-temp-sub">--</div>
-        <div class="bar"><i id="m-temp-bar"></i></div>
+        <div class="k">CPU 温度</div>
+        <div class="v"><span id="m-temp-cpu">--</span><small>°C</small></div>
+        <div class="sub" id="m-temp-cpu-sub">传感器不可用</div>
+        <div class="bar"><i id="m-temp-cpu-bar"></i></div>
+      </div>
+      <div class="metric">
+        <div class="k">基带温度</div>
+        <div class="v"><span id="m-temp-modem">--</span><small>°C</small></div>
+        <div class="sub" id="m-temp-modem-sub">传感器不可用</div>
+        <div class="bar"><i id="m-temp-modem-bar"></i></div>
+      </div>
+      <div class="metric">
+        <div class="k">PMIC 温度</div>
+        <div class="v"><span id="m-temp-pmic">--</span><small>°C</small></div>
+        <div class="sub" id="m-temp-pmic-sub">电源管理芯片 · 非 CPU/基带</div>
+        <div class="bar"><i id="m-temp-pmic-bar"></i></div>
       </div>
       <div class="metric">
         <div class="k">磁盘</div>
@@ -246,6 +258,11 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
 
     <div class="sec-title">传感器</div>
     <div class="rows" id="m-sensors"><div class="rw"><span class="k">--</span><span class="v">--</span></div></div>
+    <div class="hint" style="margin-top:6px">
+      CPU / 基带温度来自 SoC 的 qcom-tsens 传感器。当前内核校准失败（calibration failed）、驱动未加载，
+      因此两项显示「传感器不可用」；pm8916-thermal 只是电源管理芯片温度，不能当作 CPU 或基带温度。
+      CPU 频率不依赖 tsens，仍可正常读取。
+    </div>
 
     <div class="sec-title">网络</div>
     <div class="rows" id="m-net"><div class="rw"><span class="k">--</span><span class="v">--</span></div></div>
@@ -468,20 +485,52 @@ function renderSystem(s){
     pctColor($('#m-mem-bar'), m.total_mb ? (m.used_mb/m.total_mb*100) : 0, false);
 
     const t = s.temp || {};
-    $('#m-temp').textContent = t.max_c ? t.max_c.toFixed(1) : '--';
-    $('#m-temp-sub').textContent = t.cpu_c ? `CPU ${t.cpu_c}°C · PMIC ${t.pmic_c || '--'}°C` : '无传感器';
-    pctColor($('#m-temp-bar'), t.max_c ? Math.min(100, (t.max_c - 20) / 60 * 100) : 0, (t.max_c||0) >= 70);
+    /* 按传感器名归类，不依赖索引顺序。CPU / 基带必须各自有真实传感器；
+     * 只有 pm8916-thermal 时一律显示「传感器不可用」，绝不拿 PMIC 顶替，
+     * 也不再用 t.max_c 当主温度（它此刻就是 PMIC 的读数）。 */
+    const sensors = Array.isArray(t.sensors) ? t.sensors.slice() : [];
+    function pickTemp(re){
+      let best = null, src = '';
+      sensors.forEach(function(x){
+        const n = (x.name || '').toLowerCase();
+        if(re.test(n) && (best === null || x.c > best)) { best = x.c; src = x.name; }
+      });
+      return { c: best, name: src };
+    }
+    function tempCard(v, prefix, note){
+      const el = $('#' + prefix), sub = $('#' + prefix + '-sub'), bar = $('#' + prefix + '-bar');
+      if(v.c === null){
+        el.textContent = '--';
+        el.style.color = 'var(--fg3)';
+        sub.textContent = '传感器不可用';
+        pctColor(bar, 0, false);
+      } else {
+        el.textContent = v.c.toFixed(1);
+        el.style.color = '';
+        sub.textContent = (note || v.name || '') + (v.c >= 70 ? ' · 高温' : '');
+        pctColor(bar, Math.min(100, (v.c - 20) / 60 * 100), v.c >= 70);
+      }
+    }
+    let cpuT = pickTemp(/cpu|apc|kryo/i);
+    if(cpuT.c === null && t.cpu_c > 0) cpuT = { c: t.cpu_c, name: 'CPU 传感器' };
+    let pmicT = pickTemp(/pm8916|pmic/i);
+    if(pmicT.c === null && t.pmic_c > 0) pmicT = { c: t.pmic_c, name: 'pm8916-thermal' };
+    tempCard(cpuT, 'm-temp-cpu');
+    tempCard(pickTemp(/modem|mss|baseband|hexagon|q6/i), 'm-temp-modem');
+    tempCard(pmicT, 'm-temp-pmic', '电源管理芯片 · 非 CPU/基带');
 
     const d = s.disk || {};
     $('#m-disk').textContent = d.percent || 0;
     $('#m-disk-sub').textContent = `${d.used_gb || 0} / ${d.total_gb || 0} GB · 剩余 ${d.free_gb || 0} GB`;
     pctColor($('#m-disk-bar'), d.percent || 0, (d.percent||0) > 85);
 
-    if(Array.isArray(t.sensors) && t.sensors.length){
-      $('#m-sensors').innerHTML = t.sensors
+    if(sensors.length){
+      $('#m-sensors').innerHTML = sensors
         .sort((a,b) => b.c - a.c)
         .map(x => `<div class="rw"><span class="k">${esc(x.name)}</span><span class="v">${x.c.toFixed(1)} °C</span></div>`)
         .join('');
+    } else {
+      $('#m-sensors').innerHTML = '<div class="rw"><span class="k">--</span><span class="v">未发现温度传感器</span></div>';
     }
 
     const nets = s.net || {};
