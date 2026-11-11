@@ -243,12 +243,6 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
         <div class="bar"><i id="m-temp-modem-bar"></i></div>
       </div>
       <div class="metric">
-        <div class="k">PMIC 温度</div>
-        <div class="v"><span id="m-temp-pmic">--</span><small>°C</small></div>
-        <div class="sub" id="m-temp-pmic-sub">电源管理芯片 · 非 CPU/基带</div>
-        <div class="bar"><i id="m-temp-pmic-bar"></i></div>
-      </div>
-      <div class="metric">
         <div class="k">磁盘</div>
         <div class="v"><span id="m-disk">--</span><small>%</small></div>
         <div class="sub" id="m-disk-sub">--</div>
@@ -259,8 +253,7 @@ h1 small{display:block;font-size:11px;font-weight:400;color:var(--fg3);margin-to
     <div class="sec-title">传感器</div>
     <div class="rows" id="m-sensors"><div class="rw"><span class="k">--</span><span class="v">--</span></div></div>
     <div class="hint" id="temp-note" style="margin-top:6px">
-      CPU / 基带温度来自 SoC 的 qcom-tsens 传感器；PM8916 是电源管理芯片温度，不代表 CPU 或基带温度。
-      CPU 频率不依赖 tsens，可独立读取。
+      CPU / 基带温度来自 SoC 的 qcom-tsens 传感器；CPU 频率不依赖 tsens，可独立读取。
     </div>
 
     <div class="sec-title">网络</div>
@@ -485,7 +478,7 @@ function renderSystem(s){
 
     const t = s.temp || {};
     /* 按传感器名归类，不依赖索引顺序。CPU / 基带必须各自有真实传感器；
-     * 缺失时一律显示「传感器不可用」，绝不拿 PMIC 或其它温区顶替，
+     * 缺失时一律显示「传感器不可用」，绝不拿其它温区顶替，
      * 也不再用 t.max_c 当主温度（max_c 只代表当前最高温的那个温区）。 */
     const sensors = Array.isArray(t.sensors) ? t.sensors.slice() : [];
     function pickTemp(re){
@@ -512,21 +505,18 @@ function renderSystem(s){
     }
     let cpuT = pickTemp(/cpu|apc|kryo/i);
     if(cpuT.c === null && t.cpu_c > 0) cpuT = { c: t.cpu_c, name: 'CPU 传感器' };
-    let pmicT = pickTemp(/pm8916|pmic/i);
-    if(pmicT.c === null && t.pmic_c > 0) pmicT = { c: t.pmic_c, name: 'pm8916-thermal' };
     const modemT = pickTemp(/modem|mss|baseband|hexagon|q6/i);
     tempCard(cpuT, 'm-temp-cpu');
     tempCard(modemT, 'm-temp-modem');
-    tempCard(pmicT, 'm-temp-pmic', '电源管理芯片 · 非 CPU/基带');
 
     /* 说明文字随实际探测到的传感器变化，不再写死「校准失败」。
-     * tsens 恢复时说明来源；缺失时明确提示哪几项不可用，且始终声明 PMIC 不能顶替。 */
+     * tsens 恢复时说明来源；缺失时明确提示哪几项不可用。 */
     const tempNote = $('#temp-note');
     if (tempNote) {
       const missing = [];
       if (cpuT.c === null) missing.push('CPU');
       if (modemT.c === null) missing.push('基带');
-      const base = 'PM8916 是电源管理芯片温度，不代表 CPU 或基带温度；CPU 频率不依赖 tsens，可独立读取。';
+      const base = 'CPU 频率不依赖 tsens，可独立读取。';
       tempNote.textContent = missing.length
         ? '未检测到 ' + missing.join(' / ') + ' 温度传感器，对应卡片显示「传感器不可用」。' + base
         : 'CPU / 基带温度来自 SoC 的 qcom-tsens 传感器；' + base;
